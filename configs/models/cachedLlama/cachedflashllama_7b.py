@@ -1,5 +1,6 @@
 # from opencompass.models import HuggingFaceCausalLM
 from opencompass.models.myModel.cachedFlashLlama import CachedFlashLlamaCausalLM
+# from ....opencompass.models.myModel.cachedFlashLlama import CachedFlashLlamaCausalLM
 from transformers import LlamaConfig
 import torch
 
@@ -17,7 +18,7 @@ if USE_CACHED_ATTENTION:
    attn_cache_config = {
          "start_size": 4,
          "recent_size": 2048,
-         "mid_size": 512,
+         "mid_size": 128,
          "compress_method": 'cut-head-suffix',
          "reserved_dim": 1024,
          "new_decompress_method": True,

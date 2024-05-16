@@ -11,11 +11,11 @@ from opencompass.registry import MODELS
 from opencompass.utils.logging import get_logger
 from opencompass.utils.prompt import PromptList
 import torch.nn.functional as F
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, AutoConfig, LlamaForCausalLM, LlamaConfig
-import sys
-sys.path.append('/remote-home/zgliu/wrote_program/kvcache_experiment')
-from AttnCache import AttnCacheConfig
-from LlamaCacheAttention import LlamaCacheAttention
+
+# from transformers import LlamaForCausalLM
+from transformers import LlamaConfig
+from .flash_utils.modeling_llama_cached_flash_attn import LlamaForCausalLM
+from .flash_utils.AttnCache import AttnCacheConfig
 
 PromptType = Union[PromptList, str]
 
@@ -77,9 +77,8 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                     path: str,
                     model_kwargs: dict,
                     peft_path: Optional[str] = None):
-        from transformers import AutoModelForCausalLM
 
-        self.config:LlamaConfig = AutoConfig.from_pretrained(path)
+        self.config = LlamaConfig.from_pretrained(path)
         self.config._attn_implementation = self.llama_attn_implementation
 
         if self.attn_cache_config is not None:
@@ -89,7 +88,7 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
 
         
         self._set_model_kwargs_torch_dtype(model_kwargs)
-        self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs, config=self.config)
+        self.model = LlamaForCausalLM.from_pretrained(path, **model_kwargs, config=self.config)
         # import ipdb
         # ipdb.set_trace()
         if peft_path is not None:
@@ -154,52 +153,3 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
             clean_cache_all_attentions(self.model)
 
         return outputs_text
-    
-    def _single_generate(self, inputs: List[str], max_out_len: int, **kwargs) -> List[str]:
-        """Support for single prompt inference.
-
-        Args:
-            inputs (List[str]): A list of strings.
-            max_out_len (int): The maximum length of the output.
-
-        Returns:
-            List[str]: A list of generated strings.
-        """
-        if self.extract_pred_after_decode:
-            prompt_lens = [len(input_) for input_ in inputs]
-
-        if self.long_bench_cat > 0:
-            inputs = [self.prompt_format.format(prompt=prompt) for prompt in inputs]
-            input_ids = self.tokenizer(inputs, padding=False, truncation=False)['input_ids']
-            input_ids = torch.tensor(input_ids)
-            if input_ids.shape[-1] > self.long_bench_cat:
-                input_ids = torch.cat([input_ids[:, : self.long_bench_cat // 2], input_ids[:, - self.long_bench_cat // 2:]], dim=-1).to(device=self.model.device)
-            else:
-                input_ids = input_ids.to(device=self.model.device)
-        # elif self.pe_config.get('streaming_enable', False) and self.pe_config.get('memory_option', '') in ['', 'sink']:
-        #     input_ids = self.tokenizer(inputs, padding=False, truncation=False)['input_ids']
-        #     input_ids = torch.tensor(input_ids)
-        #     if input_ids.shape[-1] > self.pe_config['start_size'] + self.pe_config['local_size']:
-        #         input_ids = torch.cat([input_ids[:, : self.pe_config['start_size']], input_ids[:, - self.pe_config['local_size']:]], dim=-1).to(device=self.model.device)
-        #     else:
-        #         input_ids = input_ids.to(device=self.model.device)
-        else:
-            input_ids = self.tokenizer(inputs, padding=False, truncation=True, max_length=self.max_seq_len)['input_ids']
-            input_ids = torch.tensor(input_ids).to(device=self.model.device)
-        
-        # generation_config = self.generation_config
-        # generation_config.max_new_tokens = max_out_len
-        # self.logger.info('input_ids give')
-        outputs = self.model.generate(input_ids=input_ids, max_new_tokens=max_out_len, do_sample=False)
-
-        if not self.extract_pred_after_decode:
-            outputs = outputs[:, input_ids.shape[1]:]
-        # self.logger.info('outputs return')
-        decodeds = self.tokenizer.batch_decode(outputs.cpu().tolist(), skip_special_tokens=True)
-
-        if self.extract_pred_after_decode:
-            decodeds = [
-                token[len_:] for token, len_ in zip(decodeds, prompt_lens)
-            ]
-
-        return decodeds

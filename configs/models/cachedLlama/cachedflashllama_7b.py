@@ -45,6 +45,7 @@ models = [
         llama_attn_implementation=llama_attn_implementation,
         attn_cache_config=attn_cache_config,
         long_bench_cat=31500,
+        # long_bench_cat=300,
 
         batch_padding=False, # if false, inference with for-loop without batch padding
         run_cfg=dict(num_gpus=1, num_procs=1),

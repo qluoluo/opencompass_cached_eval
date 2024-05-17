@@ -21,7 +21,7 @@ infer = dict(
     # partitioner=dict(type='NaivePartitioner'),
     runner=dict(
         type=SlurmRunner,
-        max_num_workers=6,
+        max_num_workers=1,
         task=dict(type=OpenICLInferTask),
         retry=1),
 )

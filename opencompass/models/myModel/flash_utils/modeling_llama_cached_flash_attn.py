@@ -39,7 +39,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
 )
 # from transformers.modeling_utils import PreTrainedModel
-from modeling_utils_cached_flash_attn import PreTrainedModel
+from .modeling_utils_cached_flash_attn import PreTrainedModel
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import (
     add_start_docstrings,
@@ -691,7 +691,7 @@ class LlamaSdpaAttention(LlamaAttention):
 ############################################################################ Modify ######################################################
 # import sys
 # sys.path.append('/remote-home/zgliu/wrote_program/kvcache_experiment')
-from AttnCache import AttnCache, AttnCacheConfig
+from .AttnCache import AttnCache, AttnCacheConfig
 import einops
 def apply_rotary_pos_emb_single(x, cos, sin, position_ids):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.

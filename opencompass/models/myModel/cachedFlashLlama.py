@@ -21,6 +21,7 @@ PromptType = Union[PromptList, str]
 
 from ..huggingface import HuggingFaceCausalLM, BaseModel
 
+@MODELS.register_module()
 class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
     def __init__(self,
                  path: str,

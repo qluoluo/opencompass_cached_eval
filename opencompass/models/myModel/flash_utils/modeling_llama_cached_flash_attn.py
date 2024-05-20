@@ -770,6 +770,9 @@ class LlamaCacheAttention(nn.Module):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def clean_cache(self):
+        self.cache.clean_cache()
+        self.cache = None
+        torch.cuda.empty_cache()
         self.cache = AttnCache(attn_cache_config=self.config.attn_cache_config, llama_config=self.config)
 
     def forward(

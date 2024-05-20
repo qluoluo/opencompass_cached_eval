@@ -21,6 +21,28 @@ PromptType = Union[PromptList, str]
 
 from ..huggingface import HuggingFaceCausalLM, BaseModel
 
+def print_gpu_memory_info():
+    # 获取当前设备的显存信息
+    current_device = torch.cuda.current_device()
+    total_memory = torch.cuda.get_device_properties(current_device).total_memory
+    allocated_memory = torch.cuda.memory_allocated(current_device)
+    cached_memory = torch.cuda.memory_cached(current_device)
+    
+    # 转换为GB单位
+    total_memory_gb = total_memory / (1024 ** 3)
+    allocated_memory_gb = allocated_memory / (1024 ** 3)
+    cached_memory_gb = cached_memory / (1024 ** 3)
+    
+    # 计算使用百分比
+    usage_percentage = (allocated_memory / total_memory) * 100
+    
+    print('*'*100)
+    print(f"Device: {current_device}")
+    print(f"Total Memory: {total_memory_gb:.2f} GB")
+    print(f"Allocated Memory: {allocated_memory_gb:.2f} GB ({usage_percentage:.2f}% used)")
+    print(f"Cached Memory: {cached_memory_gb:.2f} GB")
+    print('*'*100)
+
 @MODELS.register_module()
 class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
     def __init__(self,
@@ -99,13 +121,16 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                                                    is_trainable=False)
         self.model.eval()
         self.model.generation_config.do_sample = False
+
+    @torch.no_grad()
     def generate(self, inputs: List[str], max_out_len: int) -> List[str]: 
         """Generate results given a list of inputs."""
         self.model.eval()  # Set the model to evaluation mode
         outputs_text = []
+        
         for text in inputs:
             input_ids = self.tokenizer(text, return_tensors="pt").input_ids
-            input_ids = torch.tensor(input_ids)
+            # input_ids = torch.tensor(input_ids)
 
             if self.long_bench_cat > 0:
                 if input_ids.shape[-1] > self.long_bench_cat:
@@ -113,27 +138,38 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                 else:
                     input_ids = input_ids.to(device=self.model.device)
             
+            print(f"\n\ninput_ids.shape: {input_ids.shape}\n")
             if self.attn_cache_config is not None:
+                # chunk_length = 128
+                # for i in range(0, input_ids.shape[-1]-1, chunk_length):
+                #     input_chunk = input_ids[:, i:min(i+chunk_length, input_ids.shape[-1]-1)]
+                #     # self.model.generate(input_chunk, max_new_tokens=0, do_sample=False)
+                #     self.model.forward(input_chunk)
                 chunk_length = 512
-                for i in range(0, input_ids.shape[-1]-1, chunk_length):
-                    input_chunk = input_ids[:, i:min(i+chunk_length, input_ids.shape[-1]-1)]
-                    # self.model.generate(input_chunk, max_new_tokens=0, do_sample=False)
+                i = 0
+
+                while i < input_ids.shape[-1] - 1:
+                    input_chunk = input_ids[:, i:min(i + chunk_length, input_ids.shape[-1] - 1)]
                     self.model.forward(input_chunk)
+                    i += chunk_length
+                    # chunk_length = max(1, int(chunk_length * 0.9))  # 确保chunk_length至少为1
+                    chunk_length = chunk_length
+                    # print(f"now chunk pos is {i}")
+                print_gpu_memory_info()
 
                 generated_ids = input_ids[:, -1:].clone().detach()
                 input_ids = input_ids[:, -1:]
                 past_key_values = None
 
-                with torch.no_grad():
-                    for _ in range(max_out_len):
-                        outputs = self.model.forward(input_ids=input_ids, past_key_values=past_key_values)
-                        past_key_values = outputs.past_key_values
-                        next_token_logits = outputs.logits[:, -1, :]
-                        next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
-                        input_ids = next_token_id
-                        generated_ids = torch.cat((generated_ids, next_token_id), dim=-1)
-                        if next_token_id == self.tokenizer.eos_token_id or next_token_id == self.tokenizer.pad_token_id:
-                            break
+                for _ in range(max_out_len):
+                    outputs = self.model.forward(input_ids=input_ids, past_key_values=past_key_values)
+                    past_key_values = outputs.past_key_values
+                    next_token_logits = outputs.logits[:, -1, :]
+                    next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
+                    input_ids = next_token_id
+                    generated_ids = torch.cat((generated_ids, next_token_id), dim=-1)
+                    if next_token_id == self.tokenizer.eos_token_id or next_token_id == self.tokenizer.pad_token_id:
+                        break
 
                 # output_tokens = self.model.generate(input_ids[:, -1:], max_new_tokens=max_out_len, do_sample=False)
                 generated_text = self.tokenizer.decode(generated_ids[0][1:], skip_special_tokens=True)
@@ -152,5 +188,6 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                 print(f"Cleared cache for {count} attention modules.")
 
             clean_cache_all_attentions(self.model)
+            torch.cuda.empty_cache()
 
         return outputs_text

@@ -23,6 +23,7 @@ if USE_CACHED_ATTENTION:
          "reserved_dim": 1024,
          "new_decompress_method": True,
          "max_storage_mid_size": -1,
+        #  "retrieve_method": "none",
    }
 
 models = [
@@ -36,7 +37,7 @@ models = [
                               truncation_side='left',
                               use_fast=False,
                               ),
-        max_out_len=500,
+        max_out_len=100,
         # max_seq_len=4096,
         batch_size=1,
         model_kwargs=dict(device_map='cuda',

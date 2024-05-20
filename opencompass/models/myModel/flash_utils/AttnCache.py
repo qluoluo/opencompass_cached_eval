@@ -20,7 +20,7 @@ class AttnCacheConfig():
             similarity_method:str='dotproduct', # 相似度计算方式
             retrieve_method:str='normal',       # 检索方式
             span_chunk_size:int=1,              # 取出最相似的token和周围的token合计的块大小
-            new_decompress_method:bool=True,   # 是否使用proj反解
+            new_decompress_method:bool=True,    # 是否使用proj反解
             max_storage_mid_size=-1,
             **kwargs
         ):
@@ -559,6 +559,7 @@ class AttnCache():
     
     # 清空cache
     def clean_cache(self):
-        self.key_cache = None
-        self.value_cache = None
+        self.key_cache = [None] * 3
+        self.value_cache = [None] * 3
         # self.position_ids_cache = None
+        torch.cuda.empty_cache()

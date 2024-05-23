@@ -132,3 +132,5 @@ turbomind/
 
 # aliyun
 core.*
+
+test_run_moss2.py

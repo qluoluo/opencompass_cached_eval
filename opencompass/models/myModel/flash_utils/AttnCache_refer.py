@@ -1,93 +1,71 @@
 import torch
 import einops
-from transformers import LlamaConfig, PretrainedConfig
+from transformers import LlamaConfig
 from functools import partial
 from typing import Tuple
 import random
-import copy
-from einops import rearrange
+from sklearn.decomposition import IncrementalPCA
 
 class AttnCacheConfig():
     def __init__(
             self,
-            start_size=4,                       # 挑选最开始的向量的个数
-            recent_size=1024,                   # 挑选最近向量的个数
-            mid_size=256,                       # 挑选中间向量的个数
-            storage_method:str='all',           # 存储方式，可选全部存储或者只存储开头和结尾的部分
-            compress_method:str='cut-prefix',   # 压缩方式
-            compress_range:str='mid',           # 压缩范围，可选全部压缩或者只压缩中间的部分
-            recover:bool=True,                  # 是否恢复向量到原来的维度
-            reserved_dim=3072,                  # 压缩到多少维度
-            similarity_method:str='dotproduct', # 相似度计算方式
-            retrieve_method:str='normal',       # 检索方式
-            span_chunk_size:int=1,              # 取出最相似的token和周围的token合计的块大小
-            new_decompress_method:bool=True,    # 是否使用proj反解
-            max_storage_mid_size=-1,
+            start_size=4,                                       # 挑选最开始的向量的个数
+            recent_size=1024,                                   # 挑选最近向量的个数
+            mid_size=256,                                       # 挑选中间向量的个数
+            
+            storage_method:str='all',                           # 存储方式，可选全部存储或者只存储开头和结尾的部分
+            compress_range:str='mid',                           # 压缩范围，可选全部压缩或者只压缩中间的部分
+            recover:bool=True,                                  # 是否恢复向量到原来的维度(暂时不用False)
+            
+            key_reserved_dim=3072,                              # key压缩到多少维度
+            key_compress_method:str='cut-prefix',               # value压缩方式，不压缩可设置为none
+
+            value_reserved_dim=3072,                            # value压缩到多少维度
+            value_compress_method:str='cut-prefix',             # value压缩方式，不压缩可设置为none
+
+            similarity_method:str='dotproduct',                 # 相似度计算方式
+            retrieve_method:str='normal',                       # 检索方式
+            span_chunk_size:int=1,                              # 取出最相似的token和周围的token合计的块大小
+            projkv_decompress_enabled:bool=True,                # 是否使用projkv反解
             **kwargs
         ):
         self.start_size = start_size
         self.recent_size = recent_size
         self.mid_size = mid_size
+
         self.storage_method = storage_method
-        self.compress_method = compress_method
         self.compress_range = compress_range
         self.recover = recover
-        self.reserved_dim = reserved_dim
+
+        self.key_reserved_dim = key_reserved_dim
+        self.key_compress_method = key_compress_method
+
+        self.value_reserved_dim = value_reserved_dim
+        self.value_compress_method = value_compress_method
+
         self.similarity_method = similarity_method
         self.retrieve_method = retrieve_method
         self.span_chunk_size = span_chunk_size
-        self.new_decompress_method = new_decompress_method
-        self.max_storage_mid_size = max_storage_mid_size
+        self.projkv_decompress_enabled = projkv_decompress_enabled
 
-    def __str__(self):
-        return (f"AttnCacheConfig(\n"
-                f"  start_size={self.start_size},\n"
-                f"  recent_size={self.recent_size},\n"
-                f"  mid_size={self.mid_size},\n"
-                f"  storage_method='{self.storage_method}',\n"
-                f"  compress_method='{self.compress_method}',\n"
-                f"  compress_range='{self.compress_range}',\n"
-                f"  recover={self.recover},\n"
-                f"  reserved_dim={self.reserved_dim},\n"
-                f"  similarity_method='{self.similarity_method}',\n"
-                f"  retrieve_method='{self.retrieve_method}',\n"
-                f"  span_chunk_size={self.span_chunk_size}\n"
-                f"  new_decompress_method={self.new_decompress_method}\n"
-                f"  max_storage_mid_size={self.max_storage_mid_size}\n"
-                f")")
-    
+
     def to_dict(self):
-        return {
-            "start_size": self.start_size,
-            "recent_size": self.recent_size,
-            "mid_size": self.mid_size,
-            "storage_method": self.storage_method,
-            "compress_method": self.compress_method,
-            "compress_range": self.compress_range,
-            "recover": self.recover,
-            "reserved_dim": self.reserved_dim,
-            "similarity_method": self.similarity_method,
-            "retrieve_method": self.retrieve_method,
-            "span_chunk_size": self.span_chunk_size,
-            "new_decompress_method": self.new_decompress_method,
-            "max_storage_mid_size": self.max_storage_mid_size,
-        }
+        return {**self.__dict__, **self.additional_params}
+    
+    def __str__(self):
+        text = f"AttnCacheConfig:"
+        for k, v in self.to_dict().items():
+            text += f"\n\t{k}: {v}"
+        return text
 
 class AttnCache():
     _initial_hint = True
 
-    def __init__(self, attn_cache_config: AttnCacheConfig, llama_config):
-        assert type(attn_cache_config) == AttnCacheConfig 
-        # assert type(llama_config) == PretrainedConfig
+    def __init__(self, attn_cache_config: AttnCacheConfig, llama_config: LlamaConfig):
+        assert type(attn_cache_config) == AttnCacheConfig and type(llama_config) == LlamaConfig
 
         self.attn_config = attn_cache_config
         self.llama_config = llama_config
-
-        self.llama_config.kv_group_num = llama_config.num_attention_heads // llama_config.num_key_value_heads
-        assert self.llama_config.kv_group_num * llama_config.num_key_value_heads == llama_config.num_attention_heads, "num_attention_heads must be divisible by num_key_value_heads"
-        self.llama_config.kv_dim = self.llama_config.hidden_size // self.llama_config.kv_group_num
-        assert self.llama_config.kv_dim * self.llama_config.kv_group_num == self.llama_config.hidden_size, "kv_dim must be divisible by kv_group_num"
-
 
         if AttnCache._initial_hint:
             print("="*100)
@@ -109,48 +87,28 @@ class AttnCache():
         if self.attn_config.storage_method == "start-recent" and self.attn_config.compress_range == "mid":
             raise ValueError("start-recent storage method cannot be used with compress range mid")
         
-        # 指定压缩范围时，必须指定压缩方法
-        # if self.attn_config.compress_range != 'none' and self.attn_config.compress_method == 'none':
-        #     raise ValueError("compress range cannot be used with compress method none")
-        
         # 不能同时start recent mid全部设为0
         if self.attn_config.mid_size == 0 and self.attn_config.recent_size == 0 and self.attn_config.start_size == 0:
             raise ValueError("mid_size, recent_size, and start_size cannot all be 0")
 
-        self.compress_function = self.get_avail_method(self.attn_config.compress_method, {
+        available_compress_method = {
             "none": self.none_compress,
-            "cut-random": partial(self.cut_compress, strategy='random'),
-            "cut-prefix": partial(self.cut_compress, strategy='prefix'),
-            "cut-suffix": partial(self.cut_compress, strategy='suffix'),
+            "cut-random": self.cut_compress,
+            "cut-prefix": self.cut_compress,
+            "cut-suffix": self.cut_compress,
             "cut-head-prefix": partial(self.cut_compress, strategy='head-prefix'),
             "cut-head-suffix": partial(self.cut_compress, strategy='head-suffix'),
             "proj": self.proj_compress,
             "incrementalpca": self.incremental_pca_compress,
-        })
+        }
 
-        if not self.attn_config.new_decompress_method:
-        # if False:
-            self.decompress_function = self.get_avail_method(self.attn_config.compress_method, {
-                "none": self.none_decompress,
-                "cut-random": self.cut_decompress,
-                "cut-prefix": self.cut_decompress,
-                "cut-suffix": self.cut_decompress,
-                "cut-head-prefix": self.cut_decompress,
-                "cut-head-suffix": self.cut_decompress,
-                "proj": self.proj_decompress,
-                "incrementalpca": self.incremental_pca_decompress,
-            }, raise_error=False)
-        else:
-            self.decompress_function = self.get_avail_method(self.attn_config.compress_method, {
-                "none": self.none_decompress,
-                "cut-random": self.cut_decompress_by_kproj,
-                "cut-prefix": self.cut_decompress_by_kproj,
-                "cut-suffix": self.cut_decompress_by_kproj,
-                "cut-head-prefix": self.cut_decompress_by_kproj,
-                "cut-head-suffix": self.cut_decompress_by_kproj,
-                "proj": self.proj_decompress,
-                "incrementalpca": self.incremental_pca_decompress,
-            }, raise_error=False)
+        self.key_compress_function = self.get_avail_method(self.attn_config.key_compress_method, available_compress_method)
+        self.value_compress_function = self.get_avail_method(self.attn_config.value_compress_method, available_compress_method)
+        
+        
+        self.key_decompress_function = self.get_avail_method(self.attn_config.key_compress_method, available_decompress_method)
+        self.value_decompress_function = self.get_avail_method(self.attn_config.value_compress_method, available_decompress_method)
+
 
         self.retrieve_function = self.get_avail_method(self.attn_config.retrieve_method, {
             "none": self.none_retrieve,
@@ -167,70 +125,121 @@ class AttnCache():
         # 分别是 start recent mid，如果压缩范围是all，都需要压缩了再存储，如果压缩范围是mid，则只需要压缩mid
         self.key_cache = [None] * 3
         self.value_cache = [None] * 3
-        # self.position_ids_cache = [None] * 3
+        self.position_ids_cache = [None] * 3
 
         # -----------------------------------------------------------------------------------------------------------------------------------
         # 下文是一些部分功能所需的必要的插件
 
         # 所有的cut方式都可以最开始确定保留的维度，故在初始化函数中完成
-        if self.attn_config.compress_method == "cut-random":
-            self.reserved_dim_idx = torch.randperm(self.llama_config.kv_dim)[:self.attn_config.reserved_dim]
-        elif self.attn_config.compress_method == "cut-prefix":
-            self.reserved_dim_idx = torch.arange(self.llama_config.kv_dim)[:self.attn_config.reserved_dim]
-        elif self.attn_config.compress_method == "cut-suffix":
-            self.reserved_dim_idx = torch.arange(self.llama_config.kv_dim)[-self.attn_config.reserved_dim:]
-        elif self.attn_config.compress_method == "cut-head-prefix":
-            head_dim = self.llama_config.kv_dim // self.llama_config.num_key_value_heads
-            reserved_head_dim = self.attn_config.reserved_dim // self.llama_config.num_key_value_heads
-            assert reserved_head_dim > 0, "reserved_dim must greater than 0"
-            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[:reserved_head_dim] + i * head_dim for i in range(self.llama_config.num_key_value_heads)])
-        elif self.attn_config.compress_method == "cut-head-suffix":
-            head_dim = self.llama_config.kv_dim // self.llama_config.num_key_value_heads
-            reserved_head_dim = self.attn_config.reserved_dim // self.llama_config.num_key_value_heads
-            assert reserved_head_dim > 0, "reserved_dim must greater than 0"
-            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[-reserved_head_dim:] + i * head_dim for i in range(self.llama_config.num_key_value_heads)])
-        else:
-            self.reserved_dim_idx = None
+        if self.attn_config.key_compress_method.startswith('cut'):
+            self.key_reserved_dim_idx = self.cut_compress_init(self.attn_config.key_compress_method,
+                                                                self.attn_config.key_reserved_dim,
+                                                                )
+            self.decompress_key_right_matrix = None
 
-        # self.q_proj_weight = None
-        # self.k_proj_weight = None
-        # self.v_proj_weight = None
-        # self.o_proj_weight = None
-        # self.real_kproj_pseudo_inv = None
-        # self.real_vproj_pseudo_inv = None
-        self.multi_right_matrix = None
+        if self.attn_config.value_compress_method.startswith('cut'):
+            self.value_reserved_dim_idx = self.cut_compress_init(self.attn_config.value_compress_method,
+                                                           self.attn_config.value_reserved_dim,
+                                                           )
+            self.decompress_value_right_matrix = None
         
-        # 增量PCA需要初始化
-        if self.attn_config.compress_method == "incrementalpca":
-            from sklearn.decomposition import IncrementalPCA
-            self.pca_model = IncrementalPCA(n_components=self.attn_config.reserved_dim)
+        def get_decompress_method(self: AttnCache, method, **decompress_kwargs):
+            if not self.attn_config.projkv_decompress_enabled:
+                available_decompress_method = {
+                    "none": self.none_decompress,
+                    "cut-random": self.cut_decompress,
+                    "cut-prefix": self.cut_decompress,
+                    "cut-suffix": self.cut_decompress,
+                    "cut-head-prefix": self.cut_decompress,
+                    "cut-head-suffix": self.cut_decompress,
+                    "proj": self.proj_decompress,
+                    "incrementalpca": self.incremental_pca_decompress,
+                }
+            else:
+                available_decompress_method ={
+                    "none": self.none_decompress,
+                    "cut-random": self.cut_decompress_by_kproj,
+                    "cut-prefix": self.cut_decompress_by_kproj,
+                    "cut-suffix": self.cut_decompress_by_kproj,
+                    "cut-head-prefix": self.cut_decompress_by_kproj,
+                    "cut-head-suffix": self.cut_decompress_by_kproj,
+                    "proj": self.proj_decompress,
+                    "incrementalpca": self.incremental_pca_decompress,
+                }
+            return partial(available_decompress_method[method], **decompress_kwargs)
 
-        # 随机投影矩阵初始化投影矩阵
-        if self.attn_config.compress_method == "proj":
-            random_matrix = torch.randn(self.llama_config.kv_dim, self.attn_config.reserved_dim, dtype=torch.float)
+        self.key_decompress_function = get_decompress_method()
+
+            
+            
+
+        # 增量PCA需要初始化
+        if self.attn_config.key_compress_method == "incrementalpca":
+            self.key_pca_model = IncrementalPCA(n_components=self.attn_config.key_reserved_dim)
+        if self.attn_config.value_compress_method == "incrementalpca":
+            self.value_pca_model = IncrementalPCA(n_components=self.attn_config.value_reserved_dim)
+
+        # 随机投影方法初始化投影矩阵
+        if self.attn_config.key_compress_method == "proj":
+            random_matrix = torch.randn(self.llama_config.hidden_size, self.attn_config.reserved_dim, dtype=torch.float)
             q, _ = torch.linalg.qr(random_matrix)
-            self.projection_matrix = q
-            self.projection_matrix_pseudo_inv = torch.pinverse(self.projection_matrix)
+            self.key_projection_matrix = q
+            self.key_projection_matrix_pseudo_inv = torch.pinverse(self.projection_matrix)
+
+        if self.attn_config.value_compress_method == "proj":
+            random_matrix = torch.randn(self.llama_config.hidden_size, self.attn_config.reserved_dim, dtype=torch.float)
+            q, _ = torch.linalg.qr(random_matrix)
+            self.value_projection_matrix = q
+            self.value_projection_matrix_pseudo_inv = torch.pinverse(self.projection_matrix)
     
     #检查init中的参数错误
-    def get_avail_method(self, method_name: str, available_methods: dict, raise_error=True):
+    def get_avail_method(self, method_name: str, available_methods: dict, raise_error=True, **method_kwargs):
         method_name = method_name.lower()
         if method_name not in available_methods and raise_error:
             raise ValueError(f"Method '{method_name}' is not available. Available methods: {', '.join(available_methods.keys())}")
-        return available_methods.get(method_name, None)
+        return partial(available_methods[method_name], **method_kwargs)
+
+
+    def cut_compress_init(self, enable, compress_method, reserved_dim):
+        # key和value关于cut的compress方法都在这里初始化，返回reserved_dim_idx
+        if not enable:
+            return None
+
+        if compress_method == "cut-random":
+            return torch.randperm(self.llama_config.hidden_size)[:reserved_dim]
+
+        elif compress_method == "cut-prefix":
+            return torch.arange(self.llama_config.hidden_size)[:reserved_dim]
+
+        elif compress_method == "cut-suffix":
+            return torch.arange(self.llama_config.hidden_size)[-reserved_dim:]
+
+        elif compress_method in ["cut-head-prefix", "cut-head-suffix"]:
+            head_dim = self.llama_config.hidden_size // self.llama_config.num_attention_heads
+            reserved_head_dim = reserved_dim // self.llama_config.num_attention_heads
+            if reserved_head_dim <= 0:
+                raise ValueError("reserved_dim must be greater than 0 for head-based compression.")
+            index_function = torch.arange(head_dim)[:reserved_head_dim] if compress_method == "cut-head-prefix" else torch.arange(head_dim)[-reserved_head_dim:]
+            return torch.cat([index_function + i * head_dim for i in range(self.llama_config.num_attention_heads)])
+        
+        else:
+            raise ValueError(f"Unsupported compression method: {compress_method}")
 
 
     @torch.no_grad()
     def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight):
-        # if self.k_proj_weight is not k_proj_weight:
-        if self.multi_right_matrix is None and self.attn_config.compress_method.startswith('cut'):
-            # self.q_proj_weight = q_proj_weight
-            # self.k_proj_weight = k_proj_weight
-            # self.v_proj_weight = v_proj_weight
+        # 计算反解矩阵
+        if self.attn_config.projkv_decompress_enabled:
 
-            new_k_proj_weight = k_proj_weight[self.reserved_dim_idx, :].float()
-            new_k_proj_weight_inv = torch.pinverse(new_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
-            self.multi_right_matrix = torch.mm(k_proj_weight, new_k_proj_weight_inv).transpose(0, 1)
+            if self.attn_config.key_compress_method.startswith('cut') and self.decompress_key_right_matrix is None:
+                new_k_proj_weight = k_proj_weight[self.key_reserved_dim_idx, :].float()
+                new_k_proj_weight_inv = torch.pinverse(new_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
+                self.decompress_key_right_matrix = torch.mm(k_proj_weight, new_k_proj_weight_inv).transpose(0, 1)
+
+            if self.attn_config.value_compress_method.startswith('cut') and self.decompress_value_right_matrix is None:
+                new_v_proj_weight = v_proj_weight[self.value_reserved_dim_idx, :].float()
+                new_v_proj_weight_inv = torch.pinverse(new_v_proj_weight).to(v_proj_weight.device).to(v_proj_weight.dtype)
+                self.decompress_value_right_matrix = torch.mm(v_proj_weight, new_v_proj_weight_inv).transpose(0, 1)
 
     # 存储方式函数
     def all_storage(self, key_states: torch.Tensor, value_states: torch.Tensor, position_ids: torch.LongTensor):
@@ -244,13 +253,11 @@ class AttnCache():
         #     self.position_ids_cache = torch.concat([self.position_ids_cache, position_ids], dim=-1)
 
         # offset标志着下一个进入缓冲区的索引序号
-        # import ipdb
-        # ipdb.set_trace()
-
         offset_seq_len = 0
 
         if self.attn_config.compress_range == "all":
-            key_states = self.compress_function(key_states, update_state=True)
+            key_states = self.key_compress_function(key_states, update_state=True)
+            value_states = self.value_compress_function(value_states, update_state=True)
 
         # 如果缓存连最开始的start_size都没满
         if self.attn_config.start_size > 0 and offset_seq_len < key_states.shape[-2] and (self.key_cache[0] is None or self.key_cache[0].shape[-2] < self.attn_config.start_size):
@@ -259,11 +266,11 @@ class AttnCache():
             if self.key_cache[0] == None:
                 self.key_cache[0] = key_states[..., offset_seq_len:offset_seq_len+cat_seq_len, :]
                 self.value_cache[0] = value_states[..., offset_seq_len:offset_seq_len+cat_seq_len, :]
-                # self.position_ids_cache[0] = position_ids[..., offset_seq_len:offset_seq_len+cat_seq_len]
+                self.position_ids_cache[0] = position_ids[..., offset_seq_len:offset_seq_len+cat_seq_len]
             else:
                 self.key_cache[0] = torch.cat([self.key_cache[0], key_states[..., offset_seq_len:offset_seq_len+cat_seq_len, :]], dim=-2)
                 self.value_cache[0] = torch.cat([self.value_cache[0], value_states[..., offset_seq_len:offset_seq_len+cat_seq_len, :]], dim=-2)
-                # self.position_ids_cache[0] = torch.cat([self.position_ids_cache[0],  position_ids[..., offset_seq_len:offset_seq_len+cat_seq_len]], dim=-1)
+                self.position_ids_cache[0] = torch.cat([self.position_ids_cache[0],  position_ids[..., offset_seq_len:offset_seq_len+cat_seq_len]], dim=-1)
             offset_seq_len += cat_seq_len
 
         # 如果startsize装完了，那就不继续了
@@ -276,11 +283,11 @@ class AttnCache():
             if self.key_cache[1] == None:
                 self.key_cache[1] = key_states[..., offset_seq_len:, :]
                 self.value_cache[1] = value_states[..., offset_seq_len:, :]
-                # self.position_ids_cache[1] = position_ids[..., offset_seq_len:]
+                self.position_ids_cache[1] = position_ids[..., offset_seq_len:]
             else:
                 self.key_cache[1] = torch.cat([self.key_cache[1], key_states[..., offset_seq_len:, :]], dim=-2)
                 self.value_cache[1] = torch.cat([self.value_cache[1], value_states[..., offset_seq_len:, :]], dim=-2)
-                # self.position_ids_cache[1] = torch.cat([self.position_ids_cache[1],  position_ids[..., offset_seq_len:]], dim=-1)
+                self.position_ids_cache[1] = torch.cat([self.position_ids_cache[1],  position_ids[..., offset_seq_len:]], dim=-1)
 
             # 如果recent有多余的部分
             if self.key_cache[1].shape[-2] > self.attn_config.recent_size:
@@ -296,7 +303,7 @@ class AttnCache():
                         self.key_cache[2] = self.key_cache[1][..., :remove_recent_head_len, :]
 
                     self.value_cache[2] = self.value_cache[1][..., :remove_recent_head_len, :]
-                    # self.position_ids_cache[2] = self.position_ids_cache[1][..., :remove_recent_head_len]
+                    self.position_ids_cache[2] = self.position_ids_cache[1][..., :remove_recent_head_len]
                 else:
                     if self.attn_config.compress_range == 'mid':
                         self.key_cache[2] = torch.cat([self.key_cache[2], self.compress_function(self.key_cache[1][..., :remove_recent_head_len, :], update_state=True)], dim=-2)
@@ -304,12 +311,12 @@ class AttnCache():
                         self.key_cache[2] = torch.cat([self.key_cache[2], self.key_cache[1][..., :remove_recent_head_len, :]], dim=-2)
                     
                     self.value_cache[2] = torch.cat([self.value_cache[2], self.value_cache[1][..., :remove_recent_head_len, :]], dim=-2)
-                    # self.position_ids_cache[2] = torch.cat([self.position_ids_cache[2],  self.position_ids_cache[1][..., :remove_recent_head_len]], dim=-1)
+                    self.position_ids_cache[2] = torch.cat([self.position_ids_cache[2],  self.position_ids_cache[1][..., :remove_recent_head_len]], dim=-1)
                 
                 # recent移除前端部分
                 self.key_cache[1] = self.key_cache[1][..., remove_recent_head_len:, :]
                 self.value_cache[1] = self.value_cache[1][..., remove_recent_head_len:, :]
-                # self.position_ids_cache[1] = self.position_ids_cache[1][..., remove_recent_head_len:]
+                self.position_ids_cache[1] = self.position_ids_cache[1][..., remove_recent_head_len:]
         else:
             # 当然，如果recent_size=0，那就直接拼到mid后面
             if self.attn_config.compress_range == 'mid':
@@ -317,14 +324,8 @@ class AttnCache():
             else:
                 self.key_cache[2] = torch.cat([self.key_cache[2], key_states[..., offset_seq_len:, :]], dim=-2)
             self.value_cache[2] = torch.cat([self.value_cache[2], value_states[..., offset_seq_len:, :]], dim=-2)
-            # self.position_ids_cache[2] = torch.cat([self.position_ids_cache[2], position_ids[..., offset_seq_len:]], dim=-1)
-        
-        if self.attn_config.max_storage_mid_size > 0 and self.key_cache[2] is not None and self.key_cache[2].shape[-2] > self.attn_config.max_storage_mid_size:
-            self.key_cache[2] = self.key_cache[2][..., -self.attn_config.max_storage_mid_size:, :]
-            self.value_cache[2] = self.value_cache[2][..., -self.attn_config.max_storage_mid_size:, :]
-            # self.position_ids_cache[2] = self.position_ids_cache[2][..., -self.attn_config.max_storage_mid_size:]
+            self.position_ids_cache[2] = torch.cat([self.position_ids_cache[2], position_ids[..., offset_seq_len:]], dim=-1)
 
-        # self.position_ids_cache = [None] * 3
     def start_recent_storage(self, key_states: torch.Tensor, value_states: torch.Tensor, position_ids: torch.LongTensor):
         # 只存储start和recent部分
         # if self.key_cache is None:
@@ -352,7 +353,7 @@ class AttnCache():
         self.all_storage(key_states, value_states, position_ids)
         self.key_cache[2] = None
         self.value_cache[2] = None
-        # self.position_ids_cache[2] = None
+        self.position_ids_cache[2] = None
 
     def get_cached_size(self):
         cached_size = 0
@@ -369,21 +370,15 @@ class AttnCache():
     def none_decompress(self, matrix: torch.Tensor):
         return matrix
 
-    def cut_compress(self, matrix: torch.Tensor, strategy: str, update_state: bool):
-        assert strategy in ['suffix', 'prefix', 'random', 'head-prefix', 'head-suffix'], "strategy must be suffix, prefix, random, head-prefix, head-suffix"
-
-        reserved_dim = self.attn_config.reserved_dim
-        if reserved_dim > matrix.shape[-1] or reserved_dim <= 0:
-            raise ValueError(f"reserved_dim {reserved_dim} should be less than hidden_dim {matrix.shape[-1]} and greater than 0")
-
-        return matrix[..., self.reserved_dim_idx]
+    def cut_compress(self, matrix: torch.Tensor, update_state: bool, reserved_dim_idx: torch.Tensor):
+        return matrix[..., reserved_dim_idx]
 
     def cut_decompress(self, matrix: torch.Tensor):
         # assert strategy in ['suffix', 'prefix', 'random', 'head-prefix', 'head-suffix'], "strategy must be suffix, prefix, random, head-prefix, head-suffix"
         if matrix is None:
             return None
         origin_shape = list(matrix.shape)
-        origin_shape[-1] = self.llama_config.kv_dim
+        origin_shape[-1] = self.llama_config.hidden_size
         new_matrix = torch.zeros(origin_shape, dtype=matrix.dtype, device=matrix.device)
         new_matrix[..., self.reserved_dim_idx] = matrix
         return new_matrix
@@ -391,9 +386,6 @@ class AttnCache():
     def cut_decompress_by_kproj(self, matrix: torch.Tensor):
         if matrix is None:
             return None
-        # import ipdb;ipdb.set_trace()
-        if self.multi_right_matrix.shape[0] == self.multi_right_matrix.shape[1]:
-            return matrix
         self.multi_right_matrix = self.multi_right_matrix.to(matrix.dtype).to(matrix.device)
         return torch.matmul(matrix, self.multi_right_matrix)
 
@@ -463,22 +455,13 @@ class AttnCache():
     def update_cache(self, key_states: torch.Tensor, value_states: torch.Tensor, position_ids: torch.LongTensor):
         '''更新缓存'''
         # 改变形状
-        if len(key_states.shape) == 4:
-            key_states_reshaped = einops.rearrange(key_states, 'b h s d -> b s (h d)')
-            value_states_reshaped = einops.rearrange(value_states, 'b h s d -> b s (h d)')
-        else:
-            assert len(key_states.shape) == 3
-            key_states_reshaped = key_states
-            value_states_reshaped = value_states
-        # print("key_states_reshaped.shape: ", key_states_reshaped.shape, "value_states_reshaped.shape: ", value_states_reshaped.shape)
-        # import ipdb
-        # ipdb.set_trace()
+        key_states_reshaped = einops.rearrange(key_states, 'b h s d -> b s (h d)')
+        value_states_reshaped = einops.rearrange(value_states, 'b h s d -> b s (h d)')
         # 存储，压缩已经集成到存储当中了
         self.storage_function(key_states_reshaped, value_states_reshaped, position_ids)
 
     # 相似度计算函数
     def dot_similarity(self, q: torch.Tensor, k: torch.Tensor):
-        q = q.view(k.shape[0], -1, k.shape[2])
         """返回是一个[batch_size * k_cache_size]的矩阵"""
         return torch.einsum("bie,bje->bje", q, k).sum(2)
 
@@ -516,7 +499,6 @@ class AttnCache():
     
     # normal检索方式
     def normal_retrieve_in_mid_keys(self, q: torch.Tensor, key_cache, value_cache):
-        # topk
         # 如果缓存为空或者长度不够，则不需要检索，直接返回缓存
         if key_cache is None or key_cache.shape[-2] < self.attn_config.mid_size:
             return key_cache, value_cache
@@ -547,8 +529,6 @@ class AttnCache():
         # query_shape = [batch_size, head_num, query_seq_len, hidden_dim]
         # 首先修正形状
         query_states_reshaped = einops.rearrange(query_states, 'b h s d -> b s (h d)')
-        query_states_reshaped = query_states_reshaped.view(query_states_reshaped.shape[0], -1, self.llama_config.kv_dim)
-        # print("query_states_reshaped.shape: ", query_states_reshaped.shape)
         # 首先均对query进行压缩，然后进行相似度检索，从midkey中找到相似的key
         # 然后有两种做法：1. 对这些key进行还原，并且返回 2.直接返回压缩的query和key
         query_states_reshaped = self.compress_function(query_states_reshaped, update_state=False)
@@ -568,8 +548,8 @@ class AttnCache():
             else:
                 key_cache = torch.cat(key_cache_list, dim=-2)
                 value_cache = torch.cat(value_cache_list, dim=-2)
-                key_cache = einops.rearrange(key_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_key_value_heads)
-                value_cache = einops.rearrange(value_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_key_value_heads)
+                key_cache = einops.rearrange(key_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_attention_heads)
+                value_cache = einops.rearrange(value_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_attention_heads)
                 # print(f"query_length = {query_states.shape[-2]}, fetched_length = {key_cache.shape[-2]}")
             return query_states, key_cache, value_cache
                 
@@ -578,7 +558,6 @@ class AttnCache():
     
     # 清空cache
     def clean_cache(self):
-        self.key_cache = [None] * 3
-        self.value_cache = [None] * 3
-        # self.position_ids_cache = None
-        torch.cuda.empty_cache()
+        self.key_cache = None
+        self.value_cache = None
+        self.position_ids_cache = None

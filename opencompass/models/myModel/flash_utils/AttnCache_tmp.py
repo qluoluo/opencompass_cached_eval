@@ -5,7 +5,6 @@ from functools import partial
 from typing import Tuple
 import random
 import copy
-from einops import rearrange
 
 class AttnCacheConfig():
     def __init__(
@@ -391,9 +390,6 @@ class AttnCache():
     def cut_decompress_by_kproj(self, matrix: torch.Tensor):
         if matrix is None:
             return None
-        # import ipdb;ipdb.set_trace()
-        if self.multi_right_matrix.shape[0] == self.multi_right_matrix.shape[1]:
-            return matrix
         self.multi_right_matrix = self.multi_right_matrix.to(matrix.dtype).to(matrix.device)
         return torch.matmul(matrix, self.multi_right_matrix)
 
@@ -470,15 +466,11 @@ class AttnCache():
             assert len(key_states.shape) == 3
             key_states_reshaped = key_states
             value_states_reshaped = value_states
-        # print("key_states_reshaped.shape: ", key_states_reshaped.shape, "value_states_reshaped.shape: ", value_states_reshaped.shape)
-        # import ipdb
-        # ipdb.set_trace()
         # 存储，压缩已经集成到存储当中了
         self.storage_function(key_states_reshaped, value_states_reshaped, position_ids)
 
     # 相似度计算函数
     def dot_similarity(self, q: torch.Tensor, k: torch.Tensor):
-        q = q.view(k.shape[0], -1, k.shape[2])
         """返回是一个[batch_size * k_cache_size]的矩阵"""
         return torch.einsum("bie,bje->bje", q, k).sum(2)
 
@@ -547,8 +539,6 @@ class AttnCache():
         # query_shape = [batch_size, head_num, query_seq_len, hidden_dim]
         # 首先修正形状
         query_states_reshaped = einops.rearrange(query_states, 'b h s d -> b s (h d)')
-        query_states_reshaped = query_states_reshaped.view(query_states_reshaped.shape[0], -1, self.llama_config.kv_dim)
-        # print("query_states_reshaped.shape: ", query_states_reshaped.shape)
         # 首先均对query进行压缩，然后进行相似度检索，从midkey中找到相似的key
         # 然后有两种做法：1. 对这些key进行还原，并且返回 2.直接返回压缩的query和key
         query_states_reshaped = self.compress_function(query_states_reshaped, update_state=False)

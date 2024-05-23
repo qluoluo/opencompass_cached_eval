@@ -5,88 +5,73 @@ from functools import partial
 from typing import Tuple
 import random
 import copy
-from einops import rearrange
 
 class AttnCacheConfig():
     def __init__(
             self,
-            start_size=4,                       # 挑选最开始的向量的个数
-            recent_size=1024,                   # 挑选最近向量的个数
-            mid_size=256,                       # 挑选中间向量的个数
-            storage_method:str='all',           # 存储方式，可选全部存储或者只存储开头和结尾的部分
-            compress_method:str='cut-prefix',   # 压缩方式
-            compress_range:str='mid',           # 压缩范围，可选全部压缩或者只压缩中间的部分
-            recover:bool=True,                  # 是否恢复向量到原来的维度
-            reserved_dim=3072,                  # 压缩到多少维度
-            similarity_method:str='dotproduct', # 相似度计算方式
-            retrieve_method:str='normal',       # 检索方式
-            span_chunk_size:int=1,              # 取出最相似的token和周围的token合计的块大小
-            new_decompress_method:bool=True,    # 是否使用proj反解
-            max_storage_mid_size=-1,
+            start_size=4,                                       # 挑选最开始的向量的个数
+            recent_size=1024,                                   # 挑选最近向量的个数
+            mid_size=256,                                       # 挑选中间向量的个数
+            
+            storage_method:str='all',                           # 存储方式，可选全部存储或者只存储开头和结尾的部分
+            compress_range:str='mid',                           # 压缩范围，可选全部压缩或者只压缩中间的部分
+            recover:bool=True,                                  # 是否恢复向量到原来的维度(暂时不用False)
+            
+            key_reserved_dim=3072,                              # key压缩到多少维度
+            key_compress_method:str='cut-prefix',               # value压缩方式，不压缩可设置为none
+
+            value_reserved_dim=3072,                            # value压缩到多少维度
+            value_compress_method:str='cut-prefix',             # value压缩方式，不压缩可设置为none
+
+            similarity_method:str='dotproduct',                 # 相似度计算方式
+            retrieve_method:str='normal',                       # 检索方式
+            span_chunk_size:int=1,                              # 取出最相似的token和周围的token合计的块大小
+            projkv_decompress_enabled:bool=True,                # 是否使用projkv反解
             **kwargs
         ):
         self.start_size = start_size
         self.recent_size = recent_size
         self.mid_size = mid_size
+
         self.storage_method = storage_method
-        self.compress_method = compress_method
         self.compress_range = compress_range
         self.recover = recover
-        self.reserved_dim = reserved_dim
+
+        self.key_reserved_dim = key_reserved_dim
+        self.key_compress_method = key_compress_method
+
+        self.value_reserved_dim = value_reserved_dim
+        self.value_compress_method = value_compress_method
+
         self.similarity_method = similarity_method
         self.retrieve_method = retrieve_method
         self.span_chunk_size = span_chunk_size
-        self.new_decompress_method = new_decompress_method
-        self.max_storage_mid_size = max_storage_mid_size
+        self.projkv_decompress_enabled = projkv_decompress_enabled
 
-    def __str__(self):
-        return (f"AttnCacheConfig(\n"
-                f"  start_size={self.start_size},\n"
-                f"  recent_size={self.recent_size},\n"
-                f"  mid_size={self.mid_size},\n"
-                f"  storage_method='{self.storage_method}',\n"
-                f"  compress_method='{self.compress_method}',\n"
-                f"  compress_range='{self.compress_range}',\n"
-                f"  recover={self.recover},\n"
-                f"  reserved_dim={self.reserved_dim},\n"
-                f"  similarity_method='{self.similarity_method}',\n"
-                f"  retrieve_method='{self.retrieve_method}',\n"
-                f"  span_chunk_size={self.span_chunk_size}\n"
-                f"  new_decompress_method={self.new_decompress_method}\n"
-                f"  max_storage_mid_size={self.max_storage_mid_size}\n"
-                f")")
-    
+
     def to_dict(self):
-        return {
-            "start_size": self.start_size,
-            "recent_size": self.recent_size,
-            "mid_size": self.mid_size,
-            "storage_method": self.storage_method,
-            "compress_method": self.compress_method,
-            "compress_range": self.compress_range,
-            "recover": self.recover,
-            "reserved_dim": self.reserved_dim,
-            "similarity_method": self.similarity_method,
-            "retrieve_method": self.retrieve_method,
-            "span_chunk_size": self.span_chunk_size,
-            "new_decompress_method": self.new_decompress_method,
-            "max_storage_mid_size": self.max_storage_mid_size,
-        }
+        return {**self.__dict__, **self.additional_params}
+    
+    def __str__(self):
+        text = f"AttnCacheConfig:"
+        for k, v in self.to_dict().items():
+            text += f"\n\t{k}: {v}"
+        return text
 
 class AttnCache():
     _initial_hint = True
 
-    def __init__(self, attn_cache_config: AttnCacheConfig, llama_config):
-        assert type(attn_cache_config) == AttnCacheConfig 
-        # assert type(llama_config) == PretrainedConfig
+    def __init__(self, attn_cache_config: AttnCacheConfig, model_config):
+        assert type(attn_cache_config) == AttnCacheConfig
 
         self.attn_config = attn_cache_config
-        self.llama_config = llama_config
+        self.model_config = model_config
 
-        self.llama_config.kv_group_num = llama_config.num_attention_heads // llama_config.num_key_value_heads
-        assert self.llama_config.kv_group_num * llama_config.num_key_value_heads == llama_config.num_attention_heads, "num_attention_heads must be divisible by num_key_value_heads"
-        self.llama_config.kv_dim = self.llama_config.hidden_size // self.llama_config.kv_group_num
-        assert self.llama_config.kv_dim * self.llama_config.kv_group_num == self.llama_config.hidden_size, "kv_dim must be divisible by kv_group_num"
+
+        self.model_config.kv_group_num = model_config.num_attention_heads // model_config.num_key_value_heads
+        assert self.model_config.kv_group_num * model_config.num_key_value_heads == model_config.num_attention_heads, "num_attention_heads must be divisible by num_key_value_heads"
+        self.model_config.kv_dim = self.model_config.hidden_size // self.model_config.kv_group_num
+        assert self.model_config.kv_dim * self.model_config.kv_group_num == self.model_config.hidden_size, "kv_dim must be divisible by kv_group_num"
 
 
         if AttnCache._initial_hint:
@@ -109,10 +94,6 @@ class AttnCache():
         if self.attn_config.storage_method == "start-recent" and self.attn_config.compress_range == "mid":
             raise ValueError("start-recent storage method cannot be used with compress range mid")
         
-        # 指定压缩范围时，必须指定压缩方法
-        # if self.attn_config.compress_range != 'none' and self.attn_config.compress_method == 'none':
-        #     raise ValueError("compress range cannot be used with compress method none")
-        
         # 不能同时start recent mid全部设为0
         if self.attn_config.mid_size == 0 and self.attn_config.recent_size == 0 and self.attn_config.start_size == 0:
             raise ValueError("mid_size, recent_size, and start_size cannot all be 0")
@@ -128,7 +109,7 @@ class AttnCache():
             "incrementalpca": self.incremental_pca_compress,
         })
 
-        if not self.attn_config.new_decompress_method:
+        if not self.attn_config.:
         # if False:
             self.decompress_function = self.get_avail_method(self.attn_config.compress_method, {
                 "none": self.none_decompress,
@@ -174,21 +155,21 @@ class AttnCache():
 
         # 所有的cut方式都可以最开始确定保留的维度，故在初始化函数中完成
         if self.attn_config.compress_method == "cut-random":
-            self.reserved_dim_idx = torch.randperm(self.llama_config.kv_dim)[:self.attn_config.reserved_dim]
+            self.reserved_dim_idx = torch.randperm(self.model_config.kv_dim)[:self.attn_config.reserved_dim]
         elif self.attn_config.compress_method == "cut-prefix":
-            self.reserved_dim_idx = torch.arange(self.llama_config.kv_dim)[:self.attn_config.reserved_dim]
+            self.reserved_dim_idx = torch.arange(self.model_config.kv_dim)[:self.attn_config.reserved_dim]
         elif self.attn_config.compress_method == "cut-suffix":
-            self.reserved_dim_idx = torch.arange(self.llama_config.kv_dim)[-self.attn_config.reserved_dim:]
+            self.reserved_dim_idx = torch.arange(self.model_config.kv_dim)[-self.attn_config.reserved_dim:]
         elif self.attn_config.compress_method == "cut-head-prefix":
-            head_dim = self.llama_config.kv_dim // self.llama_config.num_key_value_heads
-            reserved_head_dim = self.attn_config.reserved_dim // self.llama_config.num_key_value_heads
+            head_dim = self.model_config.kv_dim // self.model_config.num_key_value_heads
+            reserved_head_dim = self.attn_config.reserved_dim // self.model_config.num_key_value_heads
             assert reserved_head_dim > 0, "reserved_dim must greater than 0"
-            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[:reserved_head_dim] + i * head_dim for i in range(self.llama_config.num_key_value_heads)])
+            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[:reserved_head_dim] + i * head_dim for i in range(self.model_config.num_key_value_heads)])
         elif self.attn_config.compress_method == "cut-head-suffix":
-            head_dim = self.llama_config.kv_dim // self.llama_config.num_key_value_heads
-            reserved_head_dim = self.attn_config.reserved_dim // self.llama_config.num_key_value_heads
+            head_dim = self.model_config.kv_dim // self.model_config.num_key_value_heads
+            reserved_head_dim = self.attn_config.reserved_dim // self.model_config.num_key_value_heads
             assert reserved_head_dim > 0, "reserved_dim must greater than 0"
-            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[-reserved_head_dim:] + i * head_dim for i in range(self.llama_config.num_key_value_heads)])
+            self.reserved_dim_idx = torch.cat([torch.arange(head_dim)[-reserved_head_dim:] + i * head_dim for i in range(self.model_config.num_key_value_heads)])
         else:
             self.reserved_dim_idx = None
 
@@ -207,7 +188,7 @@ class AttnCache():
 
         # 随机投影矩阵初始化投影矩阵
         if self.attn_config.compress_method == "proj":
-            random_matrix = torch.randn(self.llama_config.kv_dim, self.attn_config.reserved_dim, dtype=torch.float)
+            random_matrix = torch.randn(self.model_config.kv_dim, self.attn_config.reserved_dim, dtype=torch.float)
             q, _ = torch.linalg.qr(random_matrix)
             self.projection_matrix = q
             self.projection_matrix_pseudo_inv = torch.pinverse(self.projection_matrix)
@@ -326,28 +307,6 @@ class AttnCache():
 
         # self.position_ids_cache = [None] * 3
     def start_recent_storage(self, key_states: torch.Tensor, value_states: torch.Tensor, position_ids: torch.LongTensor):
-        # 只存储start和recent部分
-        # if self.key_cache is None:
-        #     self.key_cache = key_states
-        #     self.value_cache = value_states
-        #     self.position_ids_cache = position_ids
-        # else:
-        #     self.key_cache = torch.concat([self.key_cache, key_states], dim=-2)
-        #     self.value_cache = torch.concat([self.value_cache, value_states], dim=-2)
-        #     self.position_ids_cache = torch.concat([self.position_ids_cache, position_ids], dim=-1)
-
-        # if self.attn_config.recent_size > 0:
-        #     self.key_cache = torch.concat([self.key_cache[..., :self.attn_config.start_size, :],
-        #                                 self.key_cache[..., self.attn_config.start_size:, :][..., -self.attn_config.recent_size:, :]], dim=-2)
-        #     self.value_cache = torch.concat([self.value_cache[..., :self.attn_config.start_size, :],
-        #                                     self.value_cache[..., self.attn_config.start_size:, :][..., -self.attn_config.recent_size:, :]], dim=-2)
-        # else:
-        #     self.key_cache = self.key_cache[..., :self.attn_config.start_size, :]
-        #     self.value_cache = self.value_cache[..., :self.attn_config.start_size, :]
-
-        # self.position_ids_cache = torch.concat([self.position_ids_cache[..., :self.attn_config.start_size],
-        #                                           self.position_ids_cache[..., self.attn_config.start_size:][..., -self.attn_config.recent_size:]], dim=-1)
-        
         # 新方法只需要把all_storage的结果的第三个(mid)设为None即可
         self.all_storage(key_states, value_states, position_ids)
         self.key_cache[2] = None
@@ -383,7 +342,7 @@ class AttnCache():
         if matrix is None:
             return None
         origin_shape = list(matrix.shape)
-        origin_shape[-1] = self.llama_config.kv_dim
+        origin_shape[-1] = self.model_config.kv_dim
         new_matrix = torch.zeros(origin_shape, dtype=matrix.dtype, device=matrix.device)
         new_matrix[..., self.reserved_dim_idx] = matrix
         return new_matrix
@@ -391,9 +350,6 @@ class AttnCache():
     def cut_decompress_by_kproj(self, matrix: torch.Tensor):
         if matrix is None:
             return None
-        # import ipdb;ipdb.set_trace()
-        if self.multi_right_matrix.shape[0] == self.multi_right_matrix.shape[1]:
-            return matrix
         self.multi_right_matrix = self.multi_right_matrix.to(matrix.dtype).to(matrix.device)
         return torch.matmul(matrix, self.multi_right_matrix)
 
@@ -470,15 +426,11 @@ class AttnCache():
             assert len(key_states.shape) == 3
             key_states_reshaped = key_states
             value_states_reshaped = value_states
-        # print("key_states_reshaped.shape: ", key_states_reshaped.shape, "value_states_reshaped.shape: ", value_states_reshaped.shape)
-        # import ipdb
-        # ipdb.set_trace()
         # 存储，压缩已经集成到存储当中了
         self.storage_function(key_states_reshaped, value_states_reshaped, position_ids)
 
     # 相似度计算函数
     def dot_similarity(self, q: torch.Tensor, k: torch.Tensor):
-        q = q.view(k.shape[0], -1, k.shape[2])
         """返回是一个[batch_size * k_cache_size]的矩阵"""
         return torch.einsum("bie,bje->bje", q, k).sum(2)
 
@@ -547,8 +499,6 @@ class AttnCache():
         # query_shape = [batch_size, head_num, query_seq_len, hidden_dim]
         # 首先修正形状
         query_states_reshaped = einops.rearrange(query_states, 'b h s d -> b s (h d)')
-        query_states_reshaped = query_states_reshaped.view(query_states_reshaped.shape[0], -1, self.llama_config.kv_dim)
-        # print("query_states_reshaped.shape: ", query_states_reshaped.shape)
         # 首先均对query进行压缩，然后进行相似度检索，从midkey中找到相似的key
         # 然后有两种做法：1. 对这些key进行还原，并且返回 2.直接返回压缩的query和key
         query_states_reshaped = self.compress_function(query_states_reshaped, update_state=False)
@@ -568,8 +518,8 @@ class AttnCache():
             else:
                 key_cache = torch.cat(key_cache_list, dim=-2)
                 value_cache = torch.cat(value_cache_list, dim=-2)
-                key_cache = einops.rearrange(key_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_key_value_heads)
-                value_cache = einops.rearrange(value_cache, 'b s (h d) -> b h s d', h=self.llama_config.num_key_value_heads)
+                key_cache = einops.rearrange(key_cache, 'b s (h d) -> b h s d', h=self.model_config.num_key_value_heads)
+                value_cache = einops.rearrange(value_cache, 'b s (h d) -> b h s d', h=self.model_config.num_key_value_heads)
                 # print(f"query_length = {query_states.shape[-2]}, fetched_length = {key_cache.shape[-2]}")
             return query_states, key_cache, value_cache
                 

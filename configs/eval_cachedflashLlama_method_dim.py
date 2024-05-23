@@ -1,6 +1,6 @@
 from mmengine.config import read_base
 with read_base():
-    from .models.cachedLlama.cachedflashllama_7b import models
+    from .models.cachedLlama.cachedflashllama_7b_multi_method_dim import models
     # from .datasets.longbench.longbenchnarrativeqa.longbench_narrativeqa_gen_a68305 import LongBench_narrativeqa_datasets
     # from .datasets.longbench.longbenchqasper.longbench_qasper_gen_6b3efc import LongBench_qasper_datasets
     # from .datasets.longbench.longbenchmultifieldqa_en.longbench_multifieldqa_en_gen_d3838e import LongBench_multifieldqa_en_datasets
@@ -34,7 +34,7 @@ with read_base():
     from .datasets.longbench.longbenchrepobench.longbench_repobench_gen import LongBench_repobench_datasets
 
 from opencompass.partitioners import SizePartitioner, NaivePartitioner
-from opencompass.runners import LocalRunner, SlurmRunner
+from opencompass.runners import LocalRunner, SlurmRunner, SlurmRunner_slurm8
 from opencompass.tasks import OpenICLInferTask, OpenICLEvalTask
 
 datasets = []
@@ -66,7 +66,8 @@ infer = dict(
     # partitioner=dict(type='NaivePartitioner'),
     runner=dict(
         type=SlurmRunner,
-        max_num_workers=4,
+        # type=SlurmRunner_slurm8,
+        max_num_workers=8,
         task=dict(type=OpenICLInferTask),
         retry=1),
 )

@@ -39,3 +39,4 @@ from .zhipuai_api import ZhiPuAI  # noqa: F401
 from .zhipuai_v2_api import ZhiPuV2AI  # noqa: F401
 
 from .myModel.cachedFlashLlama import CachedFlashLlamaCausalLM
+from .myModel.cachedFlashInternLM2 import CachedFlashInternLM2CausalLM

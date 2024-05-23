@@ -17,7 +17,7 @@ from .base import BaseRunner
 
 
 @RUNNERS.register_module()
-class SlurmRunner(BaseRunner):
+class SlurmRunner_slurm8(BaseRunner):
     """Distributed runner based on Slurm. It will launch tasks in parallel
     using `srun` command.
 
@@ -110,7 +110,7 @@ class SlurmRunner(BaseRunner):
                 tmpl += f' --gres=gpu:{num_gpus}'
 
             tmpl += ' --cpus-per-task=12 --mem-per-cpu=4G '
-            # tmpl += ' --nodelist=x090-6 '
+            tmpl += ' --nodelist=slurmd-8 '
 
             for extra_cmd in self.extra_command:
                 tmpl += f' {extra_cmd}'

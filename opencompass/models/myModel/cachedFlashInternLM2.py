@@ -13,8 +13,8 @@ from opencompass.utils.prompt import PromptList
 import torch.nn.functional as F
 
 # from transformers import LlamaForCausalLM
-from transformers import LlamaConfig
-from .flash_utils.modeling_llama_cached_flash_attn import LlamaForCausalLM
+from transformers import AutoConfig
+from .flash_utils.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
 from .flash_utils.AttnCache import AttnCacheConfig
 
 PromptType = Union[PromptList, str]
@@ -44,7 +44,7 @@ def print_gpu_memory_info():
     print('*'*100)
 
 @MODELS.register_module()
-class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
+class CachedFlashInternLM2CausalLM(HuggingFaceCausalLM):
     def __init__(self,
                  path: str,
                  hf_cache_dir: Optional[str] = None,
@@ -65,7 +65,7 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                  attn_cache_config = None,
                  long_bench_cat = -1,
                  prompt_format: str = '{prompt}',
-                 llama_attn_implementation: str = 'eager'):
+                 internlm2_attn_implementation: str = 'eager'):
         BaseModel.__init__(self, path=path,
                          max_seq_len=max_seq_len,
                          tokenizer_only=tokenizer_only,
@@ -78,7 +78,7 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
         self.mode = mode
 
         self.attn_cache_config = attn_cache_config
-        self.llama_attn_implementation = llama_attn_implementation
+        self.internlm2_attn_implementation = internlm2_attn_implementation
 
         self._load_tokenizer(path=path,
                              tokenizer_path=tokenizer_path,
@@ -101,8 +101,8 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                     model_kwargs: dict,
                     peft_path: Optional[str] = None):
 
-        self.config = LlamaConfig.from_pretrained(path)
-        self.config._attn_implementation = self.llama_attn_implementation
+        self.config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+        self.config.attn_implementation = self.internlm2_attn_implementation
 
         if self.attn_cache_config is not None:
             # assert type(attn_cache_config) == dict, f"attn_cache_config must be a dict, but got {type(attn_cache_config)}"
@@ -111,7 +111,9 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
 
         
         self._set_model_kwargs_torch_dtype(model_kwargs)
-        self.model = LlamaForCausalLM.from_pretrained(path, **model_kwargs, config=self.config)
+        self.model = InternLM2ForCausalLM.from_pretrained(path, **model_kwargs,
+                                                          config=self.config,
+                                                          attn_implementation=self.internlm2_attn_implementation)
         # import ipdb
         # ipdb.set_trace()
         if peft_path is not None:

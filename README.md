@@ -30,6 +30,8 @@ opencompass详细用法可以至[OpenCompass官方教程](https://opencompass.re
 ```
 ## 以下的python脚本均使用了slurmRunner，如不处于集群中需要至脚本中改为LocalRunner
 ## 需要把slurmName自行替换为slurm分区名称
+## 需要到对应脚本中改变模型地址
+
 python run.py configs/eval_cachedflashInterLM2.py -w outputs/eval_result/ -p slurmName
 python run.py configs/eval_cachedflashLlama.py -w outputs/eval_result/ -p slurmName
 ```

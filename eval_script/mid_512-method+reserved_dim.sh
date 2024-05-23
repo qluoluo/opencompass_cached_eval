@@ -1,1 +1,0 @@
-python run.py configs/eval_cachedflashLlama.py -w outputs/cached_attn_llama2-mid128-chunk-512/method-reserveddim/ -p a800

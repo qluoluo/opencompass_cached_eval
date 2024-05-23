@@ -25,6 +25,7 @@ unzip OpenCompassData-core-20240207.zip
 
 ### 🚀 开始评测
 已经做了Llama2与其他若干模型的适配工作。运行以下代码开始评测
+
 opencompass详细用法可以至[OpenCompass官方教程](https://opencompass.readthedocs.io/zh-cn/latest/index.html)查看
 
 ```

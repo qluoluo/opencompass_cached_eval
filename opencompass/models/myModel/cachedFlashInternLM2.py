@@ -14,8 +14,11 @@ import torch.nn.functional as F
 
 # from transformers import LlamaForCausalLM
 from transformers import AutoConfig
-from .flash_utils.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
-from .flash_utils.AttnCache import AttnCacheConfig
+
+# from .flash_utils.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
+# from .flash_utils.AttnCache import AttnCacheConfig
+from .flash_utils_v2.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
+from .flash_utils_v2.AttnCache import AttnCacheConfig
 
 PromptType = Union[PromptList, str]
 

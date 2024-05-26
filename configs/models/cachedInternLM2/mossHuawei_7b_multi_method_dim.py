@@ -8,7 +8,8 @@ import torch
 internlm2_model_path = 'models/mossHuawei'
 models = []
 
-for compress_mothod in ['cut-random', 'cut-head-suffix', 'cut-head-prefix']:
+# for compress_mothod in ['cut-random', 'cut-head-suffix', 'cut-head-prefix']:
+for compress_mothod in ['cut-suffix', 'cut-prefix']:
     for reserved_dim in [64, 128, 256]:
 
         attn_cache_config = None

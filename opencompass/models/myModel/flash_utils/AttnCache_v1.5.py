@@ -14,7 +14,11 @@ class AttnCacheConfig():
             mid_size=256,                                       # 挑选中间向量的个数
             
             storage_method:str='all',                           # 存储方式，可选全部存储或者只存储开头和结尾的部分
+            # all, start-recent
+
             compress_range:str='mid',                           # 压缩范围，可选全部压缩或者只压缩中间的部分
+            # mid, all
+            
             recover:bool=True,                                  # 是否恢复向量到原来的维度(暂时不用False)
             
             key_reserved_dim=3072,                              # key压缩到多少维度
@@ -97,8 +101,9 @@ class AttnCache():
         # 不能同时start recent mid全部设为0
         if self.attn_config.mid_size == 0 and self.attn_config.recent_size == 0 and self.attn_config.start_size == 0:
             raise ValueError("mid_size, recent_size, and start_size cannot all be 0")
+        
 
-        self.compress_function = self.get_avail_method(self.attn_config.compress_method, {
+        compress_available_method = {
             "none": self.none_compress,
             "cut-random": partial(self.cut_compress, strategy='random'),
             "cut-prefix": partial(self.cut_compress, strategy='prefix'),
@@ -107,11 +112,14 @@ class AttnCache():
             "cut-head-suffix": partial(self.cut_compress, strategy='head-suffix'),
             "proj": self.proj_compress,
             "incrementalpca": self.incremental_pca_compress,
-        })
+        }
+        self.key_compress_function = self.get_avail_method(self.attn_config.key_compress_method, compress_available_method, obj_name="key")
+        self.value_compress_function = self.get_avail_method(self.attn_config.value_compress_method, compress_available_method, obj_name="value")
 
-        if not self.attn_config.:
-        # if False:
-            self.decompress_function = self.get_avail_method(self.attn_config.compress_method, {
+
+        # 是否启用kv 反解的方法
+        if not self.attn_config.projkv_decompress_enabled:
+            decompress_available_method = {
                 "none": self.none_decompress,
                 "cut-random": self.cut_decompress,
                 "cut-prefix": self.cut_decompress,
@@ -120,9 +128,9 @@ class AttnCache():
                 "cut-head-suffix": self.cut_decompress,
                 "proj": self.proj_decompress,
                 "incrementalpca": self.incremental_pca_decompress,
-            }, raise_error=False)
+            }
         else:
-            self.decompress_function = self.get_avail_method(self.attn_config.compress_method, {
+            decompress_available_method = {
                 "none": self.none_decompress,
                 "cut-random": self.cut_decompress_by_kproj,
                 "cut-prefix": self.cut_decompress_by_kproj,
@@ -131,7 +139,10 @@ class AttnCache():
                 "cut-head-suffix": self.cut_decompress_by_kproj,
                 "proj": self.proj_decompress,
                 "incrementalpca": self.incremental_pca_decompress,
-            }, raise_error=False)
+            }
+        self.key_decompress_function = self.get_avail_method(self.attn_config.key_compress_method, decompress_available_method, raise_error=False, obj_name='key')
+        self.value_decompress_function = self.get_avail_method(self.attn_config.value_compress_method, decompress_available_method, raise_error=False, obj_name='value')
+
 
         self.retrieve_function = self.get_avail_method(self.attn_config.retrieve_method, {
             "none": self.none_retrieve,
@@ -173,13 +184,11 @@ class AttnCache():
         else:
             self.reserved_dim_idx = None
 
-        # self.q_proj_weight = None
-        # self.k_proj_weight = None
-        # self.v_proj_weight = None
-        # self.o_proj_weight = None
-        # self.real_kproj_pseudo_inv = None
-        # self.real_vproj_pseudo_inv = None
-        self.multi_right_matrix = None
+        if self.attn_config.projkv_decompress_enabled:
+            if self.attn_config.key_compress_method.startswith("cut"):
+                self.key_multi_right_matrix = None
+            if self.attn_config.value_compress_method.startswith("cut"):
+                self.value_multi_right_matrix = None
         
         # 增量PCA需要初始化
         if self.attn_config.compress_method == "incrementalpca":
@@ -194,14 +203,13 @@ class AttnCache():
             self.projection_matrix_pseudo_inv = torch.pinverse(self.projection_matrix)
     
     #检查init中的参数错误
-    def get_avail_method(self, method_name: str, available_methods: dict, raise_error=True):
+    def get_avail_method(self, method_name: str, available_methods: dict, raise_error=True, **kwargs):
         method_name = method_name.lower()
         if method_name not in available_methods and raise_error:
             raise ValueError(f"Method '{method_name}' is not available. Available methods: {', '.join(available_methods.keys())}")
-        return available_methods.get(method_name, None)
+        return partial(available_methods.get(method_name, None), **kwargs)
 
 
-    @torch.no_grad()
     def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight):
         # if self.k_proj_weight is not k_proj_weight:
         if self.multi_right_matrix is None and self.attn_config.compress_method.startswith('cut'):
@@ -322,14 +330,42 @@ class AttnCache():
 
 
     # 压缩方式函数
-    def none_compress(self, matrix: torch.Tensor, update_state: bool):
+    def none_compress(self, matrix: torch.Tensor, **kwargs):
         return matrix
     
-    def none_decompress(self, matrix: torch.Tensor):
+    def none_decompress(self, matrix: torch.Tensor, **kwargs):
         return matrix
 
-    def cut_compress(self, matrix: torch.Tensor, strategy: str, update_state: bool):
+    def cut_compress_init(self, strategy: str, obj_name: str):
+        if not hasattr(self, 'cut_reserved_dim_idx'):
+            self.cut_reserved_dim_idx = dict()
+
+        if strategy == "random":
+            self.cut_reserved_dim_idx = torch.randperm(self.model_config.kv_dim)[:self.attn_config.reserved_dim]
+        elif strategy == "prefix":
+            self.cut_reserved_dim_idx = torch.arange(self.model_config.kv_dim)[:self.attn_config.reserved_dim]
+        elif strategy == "cut-suffix":
+            self.cut_reserved_dim_idx = torch.arange(self.model_config.kv_dim)[-self.attn_config.reserved_dim:]
+        elif strategy == "cut-head-prefix":
+            head_dim = self.model_config.kv_dim // self.model_config.num_key_value_heads
+            reserved_head_dim = self.attn_config.reserved_dim // self.model_config.num_key_value_heads
+            assert reserved_head_dim > 0, "reserved_dim must greater than 0"
+            self.cut_reserved_dim_idx = torch.cat([torch.arange(head_dim)[:reserved_head_dim] + i * head_dim for i in range(self.model_config.num_key_value_heads)])
+        elif strategy == "cut-head-suffix":
+            head_dim = self.model_config.kv_dim // self.model_config.num_key_value_heads
+            reserved_head_dim = self.attn_config.reserved_dim // self.model_config.num_key_value_heads
+            assert reserved_head_dim > 0, "reserved_dim must greater than 0"
+            self.cut_reserved_dim_idx = torch.cat([torch.arange(head_dim)[-reserved_head_dim:] + i * head_dim for i in range(self.model_config.num_key_value_heads)])
+        else:
+            self.cut_reserved_dim_idx = None
+            raise NotImplementedError(f"strategy {strategy} not implemented")
+
+    def cut_compress(self, matrix: torch.Tensor, strategy: str, obj_name: str, **kwargs):
+        ## obj_name 用于区分k和v具体压缩时的不同参数
         assert strategy in ['suffix', 'prefix', 'random', 'head-prefix', 'head-suffix'], "strategy must be suffix, prefix, random, head-prefix, head-suffix"
+
+        if not hasattr(self, 'cut_reserved_dim_idx') or obj_name not in self.cut_reserved_dim_idx.keys():
+            self.cut_compress_init(strategy, obj_name)
 
         reserved_dim = self.attn_config.reserved_dim
         if reserved_dim > matrix.shape[-1] or reserved_dim <= 0:

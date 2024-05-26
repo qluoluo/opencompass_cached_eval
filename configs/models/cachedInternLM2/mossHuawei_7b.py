@@ -14,20 +14,26 @@ USE_CACHED_ATTENTION = True
 if USE_CACHED_ATTENTION:
    internlm2_attn_implementation = "cached_flash_attention_2"
    attn_cache_config = {
-         "start_size": 4,
-         "recent_size": 2048,
-         "mid_size": 512,
-         "compress_method": 'cut-head-suffix',
-         "reserved_dim": 256,
-         "new_decompress_method": True,
-         "max_storage_mid_size": -1,
-        #  "retrieve_method": "none",
+        "start_size": 4,
+        "recent_size": 2048,
+        "mid_size": 512,
+
+        "key_compress_method": 'cut-head-suffix',
+        "key_reserved_dim": 256,
+        "key_compress_split_head": False,
+        
+        "value_compress_method": "none",
+        "value_reserved_dim": 4096,
+        "value_compress_split_head": False,
+
+        "new_decompress_method": True,
+        "max_storage_mid_size": -1,
    }
 
 models = [
     dict(
         type=CachedFlashInternLM2CausalLM,
-        abbr=f'cachedinternlm2-7b-{attn_cache_config["compress_method"]}-{attn_cache_config["reserved_dim"]}',
+        abbr=f'cachedinternlm2-7b-{attn_cache_config["key_compress_method"]}-{attn_cache_config["key_reserved_dim"]}-{attn_cache_config["value_compress_method"]}-{attn_cache_config["value_reserved_dim"]}',
         path=internlm2_model_path,
         tokenizer_path=internlm2_model_path,
         tokenizer_kwargs=dict(padding_side='left',

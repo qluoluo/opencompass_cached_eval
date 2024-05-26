@@ -217,11 +217,19 @@ class AttnCache():
 
     # 通过投影矩阵更新反解矩阵
     def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight):
+        # k_proj_weight.shape = [proj_dim, hidden_dim]
         if self.attn_config.compress_method['key'].startswith("cut"):
             if self.cut_decompress_right_matrix.get('key', None) is None:
-                cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx['key'], :].float()
-                cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
-                self.cut_decompress_right_matrix['key'] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
+                if self.attn_config.compress_split_head['key'] is False:
+                    cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx['key'], :].float()
+                    cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
+                    self.cut_decompress_right_matrix['key'] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
+                else:
+                    raise NotImplementedError("cut-split-head is not supported yet")
+                    inv_proj_list = []
+                    for i in range(self.model_config.num_key_value_heads):
+                        proj = k_proj_weight[i * self.head_dim:(i + 1) * self.head_dim, :]
+                        cut_proj = proj[self.cut_reserved_dim_idx, :]
 
         if self.attn_config.compress_method['value'].startswith("cut"):
             if self.cut_decompress_right_matrix.get('value', None) is None:

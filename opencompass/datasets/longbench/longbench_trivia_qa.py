@@ -1,6 +1,8 @@
-from datasets import Dataset, load_dataset
+from datasets import Dataset  #, load_dataset
 
 from opencompass.registry import LOAD_DATASET, TEXT_POSTPROCESSORS
+from opencompass.utils.internal.load_dataset import \
+    load_local_dataset as load_dataset
 
 from ..base import BaseDataset
 

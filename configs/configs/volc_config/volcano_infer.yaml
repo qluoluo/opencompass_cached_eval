@@ -1,0 +1,25 @@
+# # hsllm_e
+# ResourceGroupID: "q-20240114171611-z7bmt"
+# # hsllm_c
+ResourceQueueID: "q-20240114171524-d5pgw"
+# hsllm_d
+# ResourceQueueID: "q-20240114171246-fm7p4"
+# distributed framework, support: TensorFlow PS,PyTorch DDP,Horovod,BytePS
+Framework: "PyTorchDDP"
+TaskRoleSpecs:
+    - RoleName: "worker"
+      RoleReplicas: 1
+      Flavor: "ml.hpcpni2l.28xlarge"
+
+ActiveDeadlineSeconds: 0
+# storages
+Storages:
+    - Type: "Vepfs"
+      MountPath: "/fs-computility/llm/shared"
+      SubPath: "llm/shared"
+    - Type: "Vepfs"
+      MountPath: "/fs-computility/llm/liuxiaoran"
+      SubPath: "llm/liuxiaoran"
+
+ImageUrl: "vemlp-cn-shanghai.cr.volces.com/preset-images/pytorch:1.13.1"
+CacheType: "Cloudfs"

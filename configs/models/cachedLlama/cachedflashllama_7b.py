@@ -22,8 +22,8 @@ if USE_CACHED_ATTENTION:
         "key_reserved_dim": 1024,
         "key_compress_split_head": False,
         
-        "value_compress_method": "none",
-        "value_reserved_dim": 4096,
+        "value_compress_method": "cut-head-suffix",
+        "value_reserved_dim": 2048,
         "value_compress_split_head": False,
 
         "new_decompress_method": True,

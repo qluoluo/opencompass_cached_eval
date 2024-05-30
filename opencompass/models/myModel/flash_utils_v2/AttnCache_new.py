@@ -5,6 +5,7 @@ from functools import partial
 from typing import Tuple
 import random
 import copy
+from sklearn.decomposition import IncrementalPCA
 
 class AttnCacheConfig():
     def __init__(
@@ -19,11 +20,11 @@ class AttnCacheConfig():
             compress_range:str='mid',                           # 压缩范围，可选全部压缩或者只压缩中间的部分
             # mid, all
             
-            key_reserved_dim:int=512,                         # key压缩后保留的维度
+            key_reserved_dim:int=512,                           # key压缩后保留的维度
             key_compress_method:str='none',                     # value压缩方式，不压缩可设置为none
             key_compress_split_head:bool=False,                 # 是否以head维度分开压缩key
 
-            value_reserved_dim:int=512,                       # value压缩后保留的维度
+            value_reserved_dim:int=512,                         # value压缩后保留的维度
             value_compress_method:str='none',                   # value压缩方式，不压缩可设置为none
             value_compress_split_head:bool=False,               # 是否以head维度分开压缩value
 
@@ -40,12 +41,7 @@ class AttnCacheConfig():
         self.mid_size = mid_size
         self.storage_range = storage_range
         self.compress_range = compress_range
-        # self.key_reserved_dim = key_reserved_dim
-        # self.key_compress_method = key_compress_method
-        # self.key_compress_split_head = key_compress_split_head
-        # self.value_reserved_dim = value_reserved_dim
-        # self.value_compress_method = value_compress_method
-        # self.value_compress_split_head = value_compress_split_head
+
         self.similarity_method = similarity_method
         self.retrieve_method = retrieve_method
         self.retrieve_split_head = retrieve_split_head
@@ -125,6 +121,7 @@ class AttnCache():
         for obj_name in ['key', 'value']:
             if self.attn_config.compress_split_head is True:
                 self.pre_compress_dim[obj_name] = self.head_dim
+                raise NotImplementedError("Not Implemented for compress_split_head")
             else:
                 self.pre_compress_dim[obj_name] = kv_dim
             self.reserved_dim[obj_name] = self.attn_config.reserved_dim[obj_name]
@@ -133,6 +130,8 @@ class AttnCache():
         self.compress_function = dict()
         self.decompress_function = dict()
         self.cut_decompress_right_matrix = dict()
+        self.pca_begin = dict()
+        self.pca_model = dict()
 
         for obj_name in ['key', 'value']:
             compress_available_method = {
@@ -153,6 +152,11 @@ class AttnCache():
                     strategy = self.attn_config.compress_method[obj_name].split('-', maxsplit=1)[1]
                     assert strategy in ['suffix', 'prefix', 'random', 'head-prefix', 'head-suffix'], "strategy must be suffix, prefix, random, head-prefix, head-suffix"
                     self.cut_compress_init(strategy, obj_name)
+
+            # 初始化pca
+            if self.attn_config.compress_method[obj_name].endswith('pca'):
+                self.pca_begin[obj_name] = False
+                self.pca_model[obj_name] = IncrementalPCA(n_components=self.reserved_dim[obj_name])
 
             decompress_available_method = {
                 "none": partial(self.none_decompress, obj_name=obj_name),
@@ -216,11 +220,21 @@ class AttnCache():
 
     # 通过投影矩阵更新反解矩阵
     def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight):
-        if self.attn_config.compress_method['key'].startswith("cut"):
-            if self.cut_decompress_right_matrix.get('key', None) is None:
-                cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx['key'], :].float()
-                cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
-                self.cut_decompress_right_matrix['key'] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
+        # k_proj_weight.shape = [proj_dim, hidden_dim]
+        # 如果是cut方法，并且还没有准备好反解矩阵
+        if self.attn_config.compress_method['key'].startswith("cut") and self.cut_decompress_right_matrix.get('key', None) is None:
+                # 如果是合并解压
+                if self.attn_config.compress_split_head['key'] is False:
+                    cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx['key'], :].float()
+                    cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
+                    self.cut_decompress_right_matrix['key'] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
+                # 如果是分开解压
+                else:
+                    # raise NotImplementedError("cut-split-head is not supported yet")
+                    inv_proj_list = []
+                    for i in range(self.model_config.num_key_value_heads):
+                        proj = k_proj_weight[i * self.head_dim:(i + 1) * self.head_dim, :]
+                        cut_proj = proj[self.cut_reserved_dim_idx, :]
 
         if self.attn_config.compress_method['value'].startswith("cut"):
             if self.cut_decompress_right_matrix.get('value', None) is None:
@@ -228,14 +242,16 @@ class AttnCache():
                 cut_v_proj_weight_inv = torch.pinverse(cut_v_proj_weight).to(v_proj_weight.device).to(v_proj_weight.dtype)
                 self.cut_decompress_right_matrix['value'] = torch.matmul(v_proj_weight, cut_v_proj_weight_inv).transpose(0, 1)
 
+    def dynamic_concat(self, old_tensor: torch.Tensor, new_tensor: torch.Tensor, dim=-2):
+        if old_tensor is None:
+            return new_tensor
+        else:
+            new_tensor = new_tensor.to(old_tensor.device).to(old_tensor.dtype)
+            return torch.cat([old_tensor, new_tensor], dim=dim)
+
     # 存储方式函数
     def all_storage(self, states: torch.Tensor, obj_name: str):
-        def dynamic_concat(old_tensor, new_tensor, dim=-2):
-            if old_tensor is None:
-                return new_tensor
-            else:
-                return torch.cat([old_tensor, new_tensor], dim=dim)
-            
+        
         # offset标志着下一个进入缓冲区的索引序号
         offset_seq_len = 0
 
@@ -246,7 +262,7 @@ class AttnCache():
         # 如果缓存连最开始的start_size都没满
         if self.attn_config.start_size > 0 and offset_seq_len < states.shape[-2] and (self.cache[obj_name]['start'] is None or self.cache[obj_name]['start'].shape[-2] < self.attn_config.start_size):
             cat_seq_len = min(states.shape[-2] - offset_seq_len, self.attn_config.start_size - self.get_cached_size())
-            self.cache[obj_name]['start'] = dynamic_concat(
+            self.cache[obj_name]['start'] = self.dynamic_concat(
                 self.cache[obj_name]['start'],
                 states[..., offset_seq_len:offset_seq_len+cat_seq_len, :])
             
@@ -259,7 +275,7 @@ class AttnCache():
 
         # recent实际上相当于一个先进先出的队列
         # 无论之前有没有填充recent，都完全拼接到recent最后，再把recent开头的多余的给mid即可
-        self.cache[obj_name]['recent'] = dynamic_concat(
+        self.cache[obj_name]['recent'] = self.dynamic_concat(
             self.cache[obj_name]['recent'],
             states[..., offset_seq_len:, :]
         )
@@ -274,7 +290,7 @@ class AttnCache():
             if self.attn_config.compress_range == 'mid':
                 move_part = self.compress_function[obj_name](move_part)
 
-            self.cache[obj_name]['mid'] = dynamic_concat(self.cache[obj_name]['mid'], move_part)
+            self.cache[obj_name]['mid'] = self.dynamic_concat(self.cache[obj_name]['mid'], move_part)
 
             # recent移除前端部分
             self.cache[obj_name]['recent'] = self.cache[obj_name]['recent'][..., remove_recent_head_len:, :]
@@ -342,40 +358,59 @@ class AttnCache():
 
     def incremental_pca_compress(self, matrix: torch.Tensor, update_state: bool, obj_name: str, **kwargs):
         # 将 Tensor 转换为 NumPy 数组进行 PCA 处理
-        reserved_dim = self.attn_config.reserved_dim
+        reserved_dim = self.reserved_dim[obj_name]
+        batch_size, seq_len, hidden_dim = matrix.shape
+        assert batch_size == 1, "incremental_pca_compress only support batch_size=1"
+
         if reserved_dim > matrix.shape[-1] or reserved_dim <= 0:
             raise ValueError(f"reserved_dim {reserved_dim} should be less than hidden_dim {matrix.shape[-1]} and greater than 0")
         if reserved_dim == matrix.shape[-1]:
             return matrix
-        
-        batch_size, seq_len, hidden_dim = matrix.shape
-        matrix_reshaped = matrix.reshape(-1, hidden_dim)
-        matrix_reshaped = matrix_reshaped.to('cpu').numpy()
-        if update_state or not hasattr(self.pca_model, 'components_'):
+
+        # 如果还没有开始PCA
+        if self.pca_begin[obj_name] is False:
+            # 如果不需要更新PCA状态（即进来的是q），直接返回
+            if not update_state:
+                return matrix
+            # 否则拼接之后判断是否到达PCA的阈值，到了就开始降维
+            # 这里我们都选择不在显存上存储mid向量，因为sklearn自带的PCA模型只能在cpu上运行
+            else: 
+                self.cache[obj_name]['mid'] = torch.concat([self.cache[obj_name]['mid'], matrix], dim=-2)
+                if self.cache[obj_name]['mid'].shape[-2] <= self.reserved_dim[obj_name]:
+                    return matrix
+                else:
+                    self.pca_begin[obj_name] = True
+                    mid_cache_cpu = self.cache[obj_name]['mid'].reshape(-1, self.cache[obj_name]['mid'].shape[-1]).to('cpu')
+                    self.pca_model[obj_name].fit(mid_cache_cpu)
+
+        matrix_reshaped = matrix.reshape(-1, hidden_dim).to('cpu')
+
+        if update_state:
             transformed_matrix = self.pca_model.fit_transform(matrix_reshaped)
         else:
             transformed_matrix = self.pca_model.transform(matrix_reshaped)
-        return torch.from_numpy(transformed_matrix).to(matrix.device)
+        import ipdb; ipdb.set_trace()
+        transformed_matrix = torch.from_numpy(transformed_matrix).to(matrix.device).reshape(batch_size, seq_len, -1)
+        return transformed_matrix
     
-    def incremental_pca_decompress(self, compressed_matrix: torch.Tensor):  
+    def incremental_pca_decompress(self, compressed_matrix: torch.Tensor, obj_name: str, **kwargs):  
         # 确保 compressed_matrix 的维度与 PCA 模型的输出维度匹配  
         if compressed_matrix.shape[1] != self.pca_model.n_components_:  
             raise ValueError("The shape of compressed_matrix does not match the number of PCA components.")  
+        
+        if self.pca_begin[obj_name] is False:
+            return compressed_matrix
         
         # 将 Tensor 转换为 NumPy 数组进行 PCA 重建  
         compressed_matrix_reshaped = compressed_matrix.to('cpu').numpy()  
         
         # 使用 PCA 模型的主成分来重建原始数据  
         # 注意：这只是一个近似值，因为 PCA 是不可逆的  
-        reconstructed_matrix = self.pca_model.inverse_transform(compressed_matrix_reshaped)  
+        reconstructed_matrix = self.pca_model[obj_name].inverse_transform(compressed_matrix_reshaped)  
         
         # 将重建的数据转换回 PyTorch Tensor，并返回到原始设备  
-        batch_size, seq_len, hidden_dim = (  
-            compressed_matrix.shape[0] * (compressed_matrix.shape[1] // self.attn_config.reserved_dim),  
-            compressed_matrix.shape[1] // self.attn_config.reserved_dim,  
-            self.attn_config.reserved_dim  
-        )  
-        reconstructed_matrix = torch.from_numpy(reconstructed_matrix).reshape(batch_size, seq_len, hidden_dim).to(compressed_matrix.device)  
+        batch_size, seq_len, hidden_dim = compressed_matrix.shape
+        reconstructed_matrix = torch.from_numpy(reconstructed_matrix).reshape(batch_size, seq_len, -1).to(compressed_matrix.device)  
         
         return reconstructed_matrix
 
@@ -406,11 +441,13 @@ class AttnCache():
     def update_cache(self, key_states: torch.Tensor, value_states: torch.Tensor, position_ids: torch.LongTensor):
         '''更新缓存'''
         # 改变形状
-        assert len(key_states.shape) == 4, "key_states.shape must be [batch_size, num_heads, seq_len, head_dim]"
-
-        key_states_reshaped = einops.rearrange(key_states, 'b h s d -> b s (h d)')
-        value_states_reshaped = einops.rearrange(value_states, 'b h s d -> b s (h d)')
-
+        if len(key_states.shape) == 4:
+            key_states_reshaped = einops.rearrange(key_states, 'b h s d -> b s (h d)')
+            value_states_reshaped = einops.rearrange(value_states, 'b h s d -> b s (h d)')
+        else:
+            assert len(key_states.shape) == 3
+            key_states_reshaped = key_states
+            value_states_reshaped = value_states
         # 存储，压缩已经集成到存储当中了
         self.storage_function(key_states_reshaped, "key")
         self.storage_function(value_states_reshaped, "value")
@@ -484,7 +521,6 @@ class AttnCache():
             return query_states, None, None
         # query_shape = [batch_size, head_num, query_seq_len, hidden_dim]
         # 首先修正形状
-
         query_states_reshaped = einops.rearrange(query_states, 'b h s d -> b s (h d)')
         # 首先均对query进行压缩，然后进行相似度检索，从midkey中找到相似的key
         # 对这些key和value进行还原，并且返回
@@ -520,4 +556,4 @@ class AttnCache():
                 "mid": None,
             },
         }
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()

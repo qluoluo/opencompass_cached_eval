@@ -1,9 +1,9 @@
 from transformers import AutoTokenizer, AutoConfig
 import torch
-from opencompass.models.myModel.flash_utils.AttnCache import AttnCacheConfig
+from opencompass.models.myModel.flash_utils_v2.AttnCache import AttnCacheConfig
 
-from opencompass.models.myModel.flash_utils.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
-from opencompass.models.myModel.flash_utils.modeling_llama_cached_flash_attn import LlamaForCausalLM
+from opencompass.models.myModel.flash_utils_v2.modeling_internlm2_cached_flash_attn import InternLM2ForCausalLM
+from opencompass.models.myModel.flash_utils_v2.modeling_llama_cached_flash_attn import LlamaForCausalLM
 
 model_path = '/remote-home/share/models/llama_v2_hf/7b'
 
@@ -15,13 +15,16 @@ if USE_CACHED_FLASH_ATTN:
     interlm2_attn_implementation = "cached_flash_attention_2"
     config.attn_cache_config = {
                         "start_size": 4,
-                        "recent_size": 128,
-                        "mid_size": 1024,
-                        "compress_method": "cut-prefix",
-                        "reserved_dim": 1024,
-                        "new_decompress_method": True,
-                        "max_storage_mid_size": -1,
-                        #  "retrieve_method": "none",
+                        "recent_size": 64,
+                        "mid_size": 32,
+
+                        "key_compress_method": 'incrementalpca',
+                        "key_reserved_dim": 64,
+                        "key_compress_split_head": False,
+                        
+                        "value_compress_method": "none",
+                        "value_reserved_dim": 4096,
+                        "value_compress_split_head": False,
                 }
 
     config.attn_cache_config = AttnCacheConfig(**config.attn_cache_config)

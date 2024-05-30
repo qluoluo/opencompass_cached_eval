@@ -32,9 +32,6 @@ for key_compress_mothod in ['cut-random', 'cut-head-suffix', 'cut-head-prefix']:
                 "value_compress_method": "none",
                 "value_reserved_dim": 4096,
                 "value_compress_split_head": False,
-
-                "new_decompress_method": True,
-                "max_storage_mid_size": -1,
             }
 
         models += [

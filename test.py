@@ -1,12 +1,20 @@
 import torch
+from sklearn.decomposition import IncrementalPCA
 
-y = torch.rand((2,3,16))
-z = torch.rand((2,4,16))
+y = torch.rand((128,256))
 
-y_shape = list(y.shape)
-y_shape[-2] = 0
-x = torch.empty(y_shape)
+print(y.shape)
 
-a = torch.cat([x,y,z], dim=-2)
+pca_model = IncrementalPCA(n_components=32)
 
-print(a.shape)
+pca_model.partial_fit(y)
+
+y = torch.rand((12,256))
+
+compressed_y = pca_model.transform(y)
+
+print(f"{compressed_y.shape=}")
+
+y_decompress = pca_model.inverse_transform(compressed_y)
+
+print(y_decompress.shape)

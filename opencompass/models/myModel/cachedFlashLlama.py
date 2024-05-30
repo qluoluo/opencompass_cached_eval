@@ -190,6 +190,6 @@ class CachedFlashLlamaCausalLM(HuggingFaceCausalLM):
                 print(f"Cleared cache for {count} attention modules.")
 
             clean_cache_all_attentions(self.model)
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
 
         return outputs_text

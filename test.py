@@ -1,55 +1,49 @@
 import torch
 
-# 创建一个示例数据矩阵 (每行是一个样本，每列是一个特征)
-X = torch.tensor([[2.5, 2.4],
-                  [0.5, 0.7],
-                  [2.2, 2.9],
-                  [1.9, 2.2],
-                  [3.1, 3.0],
-                  [2.3, 2.7],
-                  [2.0, 1.6],
-                  [1.0, 1.1],
-                  [1.5, 1.6],
-                  [1.1, 0.9]], dtype=torch.float)
+# 创建一个随机的矩阵A，大小为4x3
+# A = torch.randn(4, 3)
+A = torch.tensor([[1, 2, 3],
+                  [4, 5, 6],
+                  [7, 8, 9],
+                  [10, 11, 7]], dtype=torch.float)
+print("Original matrix A:")
+print(A)
 
-# 1. 数据标准化 (使每个特征的均值为0)
-X_mean = torch.mean(X, dim=0)
-X_centered = X - X_mean
+# 使用torch.svd进行奇异值分解
+U, S, V = torch.svd(A)
 
-# 2. 计算协方差矩阵
-cov_matrix = torch.mm(X_centered.t(), X_centered) / (X_centered.shape[0] - 1)
+# 选择k的值
+k = 2
 
-# 3. 进行SVD分解
-U, S, V = torch.svd(cov_matrix)
+# 取S的前k个值，并构造对角矩阵
+S_k = torch.diag(S[:k])
 
-# 4. 选择前 k 个主成分 (k=1)
-k = 1
+# 取U和V的前k列
 U_k = U[:, :k]
+V_k = V[:, :k]
 
-# 5. 将原始数据投影到低维空间
-X_pca = torch.mm(X_centered, U_k)
+# 中间矩阵开根号
+S_k_sqrt = torch.sqrt(S_k)
 
-# 6. 重构数据
-X_reconstructed = torch.mm(X_pca, U_k.t()) + X_mean
+# 构造两个矩阵的乘积
+B = torch.mm(U_k, S_k_sqrt)
+C = torch.mm(S_k_sqrt, V_k.t())
+# B = U_k
+# C = torch.mm(S_k, V_k.t())
+# B = torch.mm(U_k, S_k)
+# C = V_k.t()
 
-# 计算重构误差
-reconstruction_error = torch.mean((X - X_reconstructed) ** 2)
+print("\nMatrix B:")
+print(B)
+print("\nMatrix C:")
+print(C)
 
-print("Original Data Matrix X:")
-print(X)
-print("\nMean-Centered Data Matrix X_centered:")
-print(X_centered)
-print("\nCovariance Matrix:")
-print(cov_matrix)
-print("\nU Matrix from SVD (Principal Components):")
-print(U)
-print("\nSingular Values:")
-print(S)
-print("\nV Matrix from SVD:")
-print(V)
-print("\nTransformed Data Matrix X_pca:")
-print(X_pca)
-print("\nReconstructed Data Matrix X_reconstructed:")
-print(X_reconstructed)
-print("\nReconstruction Error:")
-print(reconstruction_error)
+# 验证原始矩阵和分解后矩阵的乘积
+A_reconstructed = torch.mm(B, C)
+print("\nReconstructed matrix A:")
+print(A_reconstructed)
+
+# 验证原始矩阵和重建矩阵的差异
+difference = torch.norm(A - A_reconstructed)
+print("\nDifference between original and reconstructed matrix:")
+print(difference)

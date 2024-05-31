@@ -18,7 +18,8 @@ if USE_CACHED_FLASH_ATTN:
                         "recent_size": 64,
                         "mid_size": 32,
 
-                        "key_compress_method": 'svd-partial',
+                        # "key_compress_method": 'svd-partial',
+                        "key_compress_method": "Wproj-svd",
                         "key_reserved_dim": 64,
                         "key_compress_split_head": False,
                         

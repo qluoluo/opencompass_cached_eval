@@ -969,7 +969,7 @@ class LlamaCacheFlashAttention2(LlamaCacheAttention):
         # import ipdb
         # ipdb.set_trace()
 
-        self.cache.update_layer_info(self.q_proj.weight, self.k_proj.weight, self.v_proj.weight)
+        self.cache.update_layer_info(self.q_proj.weight, self.k_proj.weight, self.v_proj.weight, hidden_states)
         # self.cache.update_cache(key_states, value_states, position_ids)
 
         # Flash attention requires the input to have the shape

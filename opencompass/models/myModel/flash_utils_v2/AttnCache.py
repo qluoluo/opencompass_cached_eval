@@ -132,6 +132,8 @@ class AttnCache():
         self.cut_decompress_right_matrix = dict()
         self.svd_begin = dict()
         self.svd_components = dict()
+        self.wproj_svd_compress_matrix = dict()
+        self.wproj_svd_decompress_matrix = dict()
 
         for obj_name in ['key', 'value']:
             compress_available_method = {
@@ -143,6 +145,7 @@ class AttnCache():
                 "cut-head-suffix": partial(self.cut_compress, obj_name=obj_name),
                 "proj": partial(self.proj_compress, obj_name=obj_name),
                 "svd-partial": partial(self.svd_partial_compress, obj_name=obj_name),
+                "wproj-svd": partial(self.wproj_svd_compress, obj_name=obj_name),
             }
             self.compress_function[obj_name] = self.get_avail_method(self.attn_config.compress_method[obj_name], compress_available_method, obj_name=obj_name)
 
@@ -157,6 +160,11 @@ class AttnCache():
             if self.attn_config.compress_method[obj_name].startswith("svd"):
                 self.svd_begin[obj_name] = False
 
+            # 初始化KV投影矩阵SVG分解方法
+            if self.attn_config.compress_method[obj_name] == "Wproj-svd":
+                self.wproj_svd_compress_matrix[obj_name] = None
+                self.wproj_svd_decompress_matrix[obj_name] = None
+
             decompress_available_method = {
                 "none": partial(self.none_decompress, obj_name=obj_name),
                 "cut-random": partial(self.cut_decompress_by_proj, obj_name=obj_name),
@@ -166,6 +174,7 @@ class AttnCache():
                 "cut-head-suffix": partial(self.cut_decompress_by_proj, obj_name=obj_name),
                 "proj": partial(self.proj_decompress, obj_name=obj_name),
                 "svd-partial": partial(self.svd_partial_decompress, obj_name=obj_name),
+                "wproj-svd": partial(self.wproj_svd_decompress, obj_name=obj_name),
             }
             self.decompress_function[obj_name] = self.get_avail_method(self.attn_config.compress_method[obj_name], decompress_available_method, obj_name=obj_name, raise_error=False)
         
@@ -226,29 +235,33 @@ class AttnCache():
         print('-'*100)
 
     # 通过投影矩阵更新反解矩阵
-    def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight):
+    def update_layer_info(self, q_proj_weight, k_proj_weight, v_proj_weight, hidden_state):
         # k_proj_weight.shape = [proj_dim, hidden_dim]
         # 如果是cut方法，并且还没有准备好反解矩阵
-        if self.attn_config.compress_method['key'].startswith("cut") and self.cut_decompress_right_matrix.get('key', None) is None:
-                # 如果是合并解压
-                if self.attn_config.compress_split_head['key'] is False:
-                    cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx['key'], :].float()
-                    cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
-                    self.cut_decompress_right_matrix['key'] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
-                # 如果是分开解压
-                else:
-                    # raise NotImplementedError("cut-split-head is not supported yet")
-                    inv_proj_list = []
-                    for i in range(self.model_config.num_key_value_heads):
-                        proj = k_proj_weight[i * self.head_dim:(i + 1) * self.head_dim, :]
-                        cut_proj = proj[self.cut_reserved_dim_idx, :]
+        self.proj_weight = {
+            "key": k_proj_weight,
+            "value": v_proj_weight,
+        }
 
-        if self.attn_config.compress_method['value'].startswith("cut"):
-            if self.cut_decompress_right_matrix.get('value', None) is None:
-                cut_v_proj_weight = v_proj_weight[self.cut_reserved_dim_idx['value'], :].float()
-                cut_v_proj_weight_inv = torch.pinverse(cut_v_proj_weight).to(v_proj_weight.device).to(v_proj_weight.dtype)
-                self.cut_decompress_right_matrix['value'] = torch.matmul(v_proj_weight, cut_v_proj_weight_inv).transpose(0, 1)
+        for obj_name in ['key', 'value']:
+            if self.attn_config.compress_method[obj_name].startswith("cut") and self.cut_decompress_right_matrix.get(obj_name, None) is None:
+                cut_k_proj_weight = k_proj_weight[self.cut_reserved_dim_idx[obj_name], :].float()
+                cut_k_proj_weight_inv = torch.pinverse(cut_k_proj_weight).to(k_proj_weight.device).to(k_proj_weight.dtype)
+                self.cut_decompress_right_matrix[obj_name] = torch.matmul(k_proj_weight, cut_k_proj_weight_inv).transpose(0, 1)
 
+            if self.attn_config.compress_method[obj_name] == "Wproj-svd":
+                self.hidden_state = hidden_state
+                if self.wproj_svd_compress_matrix[obj_name] is None:
+                    U, S, V = torch.svd(self.proj_weight[obj_name].float())
+                    k = self.attn_config.reserved_dim[obj_name]
+                    U_k = U[:, :k]
+                    V_k = V[:, :k]
+                    S_k_sqrt = torch.diag(torch.sqrt(S[:k]))
+                    B = torch.mm(U_k, S_k_sqrt)
+                    C = torch.mm(S_k_sqrt, V_k.t())
+                    self.wproj_svd_decompress_matrix[obj_name] = B.t().to(self.proj_weight[obj_name].dtype)
+                    self.wproj_svd_compress_matrix[obj_name] = C.t().to(self.proj_weight[obj_name].dtype)
+            
     def dynamic_concat(self, old_tensor: torch.Tensor, new_tensor: torch.Tensor, dim=-2):
         if old_tensor is None:
             return new_tensor
@@ -363,6 +376,7 @@ class AttnCache():
         self.cut_decompress_right_matrix[obj_name] = self.cut_decompress_right_matrix[obj_name].to(matrix.dtype).to(matrix.device)
         return torch.matmul(matrix, self.cut_decompress_right_matrix[obj_name])
 
+#################################################################################################################
     def svd_partial_init(self, obj_name: str):
         if self.svd_begin[obj_name] is False:
             if self.cache[obj_name]['mid'] is None or self.cache[obj_name]['mid'].shape[-2] <= self.reserved_dim[obj_name]:
@@ -455,6 +469,22 @@ class AttnCache():
         decompressed_matrix_reshaped += mean
         decompressed_matrix = decompressed_matrix_reshaped.view(batch_size, seq_len, hidden_dim).to(compressed_matrix.dtype)
 
+        return decompressed_matrix
+###############################################################################################################################################
+    def wproj_svd_compress(self, matrix: torch.Tensor, obj_name: str, **kwargs):
+        if matrix is None:
+            return None
+        print(f"{matrix.shape=}")
+        compressed_matrix = torch.matmul(self.hidden_state, self.wproj_svd_compress_matrix[obj_name])
+        print(f"{compressed_matrix.shape=}\n")
+        return compressed_matrix
+    
+    def wproj_svd_decompress(self, matrix: torch.Tensor, obj_name: str, **kwargs):
+        if matrix is None:
+            return None
+        print(f"{matrix.shape=}")
+        decompressed_matrix = torch.matmul(matrix, self.wproj_svd_decompress_matrix[obj_name])
+        print(f"{decompressed_matrix.shape=}\n")
         return decompressed_matrix
 
     def proj_compress(self, matrix: torch.Tensor, update_state: bool):
@@ -604,4 +634,5 @@ class AttnCache():
                 "mid": None,
             },
         }
+        # self.__init__(self.attn_config, self.model_config)
         # torch.cuda.empty_cache()

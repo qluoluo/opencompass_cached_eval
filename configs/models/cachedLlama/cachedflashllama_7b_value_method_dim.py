@@ -11,8 +11,8 @@ llama_model_path = "/remote-home/share/models/llama_v2_hf/7b"
 models = []
 
 # for compress_mothod in ['random', 'cut-head-suffix', 'cut-head-prefix', 'cut-suffix', 'cut-prefix']:
-for value_compress_mothod in ['cut-random', 'cut-head-suffix', 'cut-head-prefix']:
-    for value_reserved_dim in [1024, 2048]:
+for value_compress_mothod in ['cut-head-suffix', 'cut-head-prefix']:
+    for value_reserved_dim in [2048]:
 
         attn_cache_config = None
         llama_attn_implementation = 'eager'

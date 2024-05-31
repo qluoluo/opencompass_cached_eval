@@ -67,7 +67,7 @@ infer = dict(
     runner=dict(
         type=SlurmRunner,
         # type=SlurmRunner_slurm8,
-        max_num_workers=8,
+        max_num_workers=4,
         task=dict(type=OpenICLInferTask),
         retry=1),
 )

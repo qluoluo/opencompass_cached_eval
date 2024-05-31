@@ -18,7 +18,7 @@ if USE_CACHED_FLASH_ATTN:
                         "recent_size": 64,
                         "mid_size": 32,
 
-                        "key_compress_method": 'incrementalpca',
+                        "key_compress_method": 'svd-partial',
                         "key_reserved_dim": 64,
                         "key_compress_split_head": False,
                         
@@ -39,7 +39,7 @@ model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, 
 prompt = "User: Please tell me about China. Answer:"
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
 
-max_new_tokens = 256
+max_new_tokens = 512
 
 with torch.no_grad():
     if not USE_CACHED_FLASH_ATTN:

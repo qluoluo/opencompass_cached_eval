@@ -5,7 +5,7 @@ from functools import partial
 from typing import Tuple
 import random
 import copy
-from sklearn.decomposition import IncrementalPCA
+# from sklearn.decomposition import IncrementalPCA
 
 class AttnCacheConfig():
     def __init__(
@@ -130,8 +130,8 @@ class AttnCache():
         self.compress_function = dict()
         self.decompress_function = dict()
         self.cut_decompress_right_matrix = dict()
-        self.pca_begin = dict()
-        self.pca_model = dict()
+        self.svd_begin = dict()
+        self.svd_components = dict()
 
         for obj_name in ['key', 'value']:
             compress_available_method = {
@@ -142,7 +142,7 @@ class AttnCache():
                 "cut-head-prefix": partial(self.cut_compress, obj_name=obj_name),
                 "cut-head-suffix": partial(self.cut_compress, obj_name=obj_name),
                 "proj": partial(self.proj_compress, obj_name=obj_name),
-                "incrementalpca": partial(self.incremental_pca_compress, obj_name=obj_name),
+                "svd-partial": partial(self.svd_partial_compress, obj_name=obj_name),
             }
             self.compress_function[obj_name] = self.get_avail_method(self.attn_config.compress_method[obj_name], compress_available_method, obj_name=obj_name)
 
@@ -153,10 +153,9 @@ class AttnCache():
                     assert strategy in ['suffix', 'prefix', 'random', 'head-prefix', 'head-suffix'], "strategy must be suffix, prefix, random, head-prefix, head-suffix"
                     self.cut_compress_init(strategy, obj_name)
 
-            # 初始化pca
-            if self.attn_config.compress_method[obj_name].endswith('pca'):
-                self.pca_begin[obj_name] = False
-                self.pca_model[obj_name] = IncrementalPCA(n_components=self.reserved_dim[obj_name])
+            # 初始化svg
+            if self.attn_config.compress_method[obj_name].startswith("svd"):
+                self.svd_begin[obj_name] = False
 
             decompress_available_method = {
                 "none": partial(self.none_decompress, obj_name=obj_name),
@@ -166,7 +165,7 @@ class AttnCache():
                 "cut-head-prefix": partial(self.cut_decompress_by_proj, obj_name=obj_name),
                 "cut-head-suffix": partial(self.cut_decompress_by_proj, obj_name=obj_name),
                 "proj": partial(self.proj_decompress, obj_name=obj_name),
-                "incrementalpca": partial(self.incremental_pca_decompress, obj_name=obj_name),
+                "svd-partial": partial(self.svd_partial_decompress, obj_name=obj_name),
             }
             self.decompress_function[obj_name] = self.get_avail_method(self.attn_config.compress_method[obj_name], decompress_available_method, obj_name=obj_name, raise_error=False)
         
@@ -364,64 +363,99 @@ class AttnCache():
         self.cut_decompress_right_matrix[obj_name] = self.cut_decompress_right_matrix[obj_name].to(matrix.dtype).to(matrix.device)
         return torch.matmul(matrix, self.cut_decompress_right_matrix[obj_name])
 
-    def incremental_pca_compress(self, matrix: torch.Tensor, update_state: bool, obj_name: str, **kwargs):
-        # 将 Tensor 转换为 NumPy 数组进行 PCA 处理
+    def svd_partial_init(self, obj_name: str):
+        if self.svd_begin[obj_name] is False:
+            if self.cache[obj_name]['mid'] is None or self.cache[obj_name]['mid'].shape[-2] <= self.reserved_dim[obj_name]:
+                return
+
+            self.svd_begin[obj_name] = True
+            bsz, seq_len, hidden_dim = self.cache[obj_name]['mid'].shape
+            mid_cache = self.cache[obj_name]['mid'].view(-1, self.cache[obj_name]['mid'].shape[-1])
+            cache_mean = torch.mean(mid_cache, dim=0)
+            # 进行 SVD 降维
+            n, d = mid_cache.shape
+            X_centered = mid_cache - cache_mean  # 中心化数据
+
+            # 计算协方差矩阵
+            cov_matrix = torch.mm(X_centered.t(), X_centered) / (X_centered.shape[0] - 1)
+
+            # 进行 SVD 分解
+            cov_matrix = cov_matrix.float()
+            U, S, V = torch.svd(cov_matrix)
+
+            # 选择前k个主成分 (例如 k=2)
+            # print("S = ", end="")
+            # for i in range(S.shape[0]):
+            #     print(f"{i} {S[i]}")
+            # print()
+            # import ipdb; ipdb.set_trace()
+            k = self.attn_config.reserved_dim[obj_name]
+            U_k = U[:, :k]
+
+            self.svd_components[obj_name] = {
+                'mean': cache_mean,
+                'U_k': U_k,
+                'S_k': S[:k]
+            }
+
+            X_pca = torch.mm(X_centered.float(), self.svd_components[obj_name]['U_k'])
+            self.cache[obj_name]['mid'] = X_pca.view(bsz, seq_len, -1).to(self.cache[obj_name]['start'].dtype)
+
+
+    def svd_partial_compress(self, matrix: torch.Tensor, obj_name: str, **kwargs):
+        # 获取预留维度
         reserved_dim = self.reserved_dim[obj_name]
         batch_size, seq_len, hidden_dim = matrix.shape
-        assert batch_size == 1, "incremental_pca_compress only support batch_size=1"
 
-        if reserved_dim > matrix.shape[-1] or reserved_dim <= 0:
-            raise ValueError(f"reserved_dim {reserved_dim} should be less than hidden_dim {matrix.shape[-1]} and greater than 0")
-        if reserved_dim == matrix.shape[-1]:
+        # 确保仅支持 batch_size 为 1 的情况
+        assert batch_size == 1, "svd_partial_compress only supports batch_size=1"
+
+        # 检查预留维度是否合理
+        if reserved_dim > hidden_dim or reserved_dim <= 0:
+            raise ValueError(f"reserved_dim {reserved_dim} should be less than hidden_dim {hidden_dim} and greater than 0")
+        if reserved_dim == hidden_dim:
             return matrix
-        
-        # 如果还没有开始PCA，判断是否达到PCA的阈值，到了就开始PCA
-        if self.pca_begin[obj_name] is False:
-            if self.cache[obj_name]['mid'] is None or self.cache[obj_name]['mid'].shape[-2] <= self.reserved_dim[obj_name]:
+
+        # 检查是否已经开始SVD
+        if self.svd_begin[obj_name] is False:
+            if self.cache[obj_name]['mid'] is None or self.cache[obj_name]['mid'].shape[-2] <= 2 * self.reserved_dim[obj_name]:
                 return matrix
             else:
-                self.pca_begin[obj_name] = True
-                mid_cache_cpu = self.cache[obj_name]['mid'].reshape(-1, self.cache[obj_name]['mid'].shape[-1]).to('cpu')
-                mid_cache_cpu = self.pca_model[obj_name].fit_transform(mid_cache_cpu)
-                self.cache[obj_name]['mid'] = torch.from_numpy(mid_cache_cpu).to(self.cache[obj_name]['mid'].device)
-                
+                self.svd_partial_init(obj_name)
 
-        matrix_reshaped = matrix.reshape(-1, hidden_dim).to('cpu')
+        # 确保 matrix 是连续的
+        matrix_reshaped = matrix.view(-1, hidden_dim).contiguous()
 
-        if update_state:
-            transformed_matrix = self.pca_model[obj_name].fit_transform(matrix_reshaped)
-        else:
-            transformed_matrix = self.pca_model[obj_name].transform(matrix_reshaped)
-        # import ipdb; ipdb.set_trace()
-        transformed_matrix = torch.from_numpy(transformed_matrix).to(matrix.device).reshape(batch_size, seq_len, -1)
-        return transformed_matrix
+        # 中心化并投影到低维空间
+        matrix_reshaped = matrix_reshaped - self.svd_components[obj_name]['mean']
+        matrix_reshaped = torch.mm(matrix_reshaped.float(), self.svd_components[obj_name]['U_k'])
+        matrix_reshaped = matrix_reshaped.view(batch_size, seq_len, -1).to(matrix.dtype)
+
+        return matrix_reshaped
     
-    def incremental_pca_decompress(self, compressed_matrix: torch.Tensor, obj_name: str, **kwargs):  
-        # 确保 compressed_matrix 的维度与 PCA 模型的输出维度匹配
-        if compressed_matrix is None:
-            return None
-        
-        if self.pca_begin[obj_name] is False:
+    def svd_partial_decompress(self, compressed_matrix: torch.Tensor, obj_name: str, **kwargs):
+        if not self.svd_begin[obj_name]:
             return compressed_matrix
+        # 获取 SVD 组件
+        svd_components = self.svd_components[obj_name]
+        U_k = svd_components['U_k']
+        mean = svd_components['mean']
 
-        if compressed_matrix.shape[-1] != self.pca_model[obj_name].n_components:  
-            raise ValueError(f"The shape of compressed_matrix {compressed_matrix.shape} does not match the number of PCA components {self.pca_model[obj_name].n_components}.")  
-    
-        
-        # 将 Tensor 转换为 NumPy 数组进行 PCA 重建  
-        compressed_matrix_reshaped = compressed_matrix.to('cpu').numpy()  
-        
-        # 使用 PCA 模型的主成分来重建原始数据  
-        # 注意：这只是一个近似值，因为 PCA 是不可逆的  
-        reconstructed_matrix = self.pca_model[obj_name].inverse_transform(compressed_matrix_reshaped)  
-        
-        # 将重建的数据转换回 PyTorch Tensor，并返回到原始设备  
-        batch_size, seq_len, hidden_dim = compressed_matrix.shape
-        reconstructed_matrix = torch.from_numpy(reconstructed_matrix).reshape(batch_size, seq_len, -1).to(compressed_matrix.device)  
+        # 获取输入矩阵的维度
+        batch_size, seq_len, reserved_dim = compressed_matrix.shape
+        hidden_dim = mean.shape[0]
 
-        # print(f"{reconstructed_matrix.shape=}")
-        
-        return reconstructed_matrix
+        # 确保输入矩阵的形状是合理的
+        if reserved_dim != U_k.shape[1]:
+            raise ValueError(f"compressed_matrix last dimension {reserved_dim} does not match U_k second dimension {U_k.shape[1]}")
+
+        # 将压缩的矩阵转换回高维空间
+        compressed_matrix_reshaped = compressed_matrix.view(-1, reserved_dim)
+        decompressed_matrix_reshaped = torch.mm(compressed_matrix_reshaped.float(), U_k.t())
+        decompressed_matrix_reshaped += mean
+        decompressed_matrix = decompressed_matrix_reshaped.view(batch_size, seq_len, hidden_dim).to(compressed_matrix.dtype)
+
+        return decompressed_matrix
 
     def proj_compress(self, matrix: torch.Tensor, update_state: bool):
         reserved_dim = self.attn_config.reserved_dim
@@ -506,7 +540,6 @@ class AttnCache():
         # 如果缓存为空或者长度不够，则不需要检索，直接返回缓存
         if key_cache is None or key_cache.shape[-2] <= self.attn_config.mid_size:
             return key_cache, value_cache
-        print(f"{q.shape=}, {key_cache.shape=}")
         scores = self.get_similarity_function(q, key_cache)
         # scores.shape = [batch_size * k_cache_size]
         scores, indices = torch.topk(scores, self.attn_config.mid_size, dim=-1)
